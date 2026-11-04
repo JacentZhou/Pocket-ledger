@@ -1,0 +1,51 @@
+const fs=require('fs');
+const vm=require('vm');
+const assert=require('node:assert/strict');
+const source=fs.readFileSync(__dirname+'/App.js','utf8');
+const start=source.indexOf('const STORAGE_KEY');
+const end=source.indexOf('const C = ');
+assert(start>=0 && end>start);
+const context=vm.createContext({Intl,Date,Math,Number,String,Object,Array});
+vm.runInContext(source.slice(start,end)+'\nglobalThis.api = { normalizeData, empty, makeBackup, readBackup, pendingOccurrencesInMonth, postPlannedMonth, applyRecordedPayment, dueDate, periodTotals, accountBalance, CATEGORY_ICONS, defaultIncomeCategories, defaultCategories };',context);
+const f=context.api;
+const bank={id:'bank',name:'Everyday',kind:'Bank',openingCents:200000};
+const old={mode:'personal',accounts:[bank],transactions:[
+ {id:'i',type:'income',date:'2026-10-22',time:null,accountId:'bank',amountCents:12300,description:'Contract work',category:'Side work'},
+ {id:'e',type:'expense',date:'2026-10-30',time:null,accountId:'bank',amountCents:400,description:'Taxi',category:'Transport'}
+],schedules:[{id:'y',kind:'income',name:'Expected salary',category:'Salary',accountId:'bank',amountCents:20000,startDate:'2026-11-15',repeat:'Monthly',lastPaidThrough:null,completed:false}],categories:[{name:'Transport',color:'#123456'},{name:'Other',color:'#8692A6'}]};
+const migrated=f.normalizeData(old);
+assert.equal(migrated.transactions.length,2);
+assert.equal(migrated.categories.find(c=>c.name==='Transport').icon,'🚌');
+assert.equal(migrated.categories.find(c=>c.name==='Transport').color,'#123456');
+assert.equal(migrated.incomeCategories.find(c=>c.name==='Salary').icon,'💼');
+assert(migrated.incomeCategories.find(c=>c.name==='Side work'));
+assert.equal(migrated.autoPostPlannedExpenses,false);
+const roundtrip=f.readBackup(JSON.stringify(f.makeBackup({...migrated,autoPostPlannedExpenses:true})));
+assert.equal(roundtrip.autoPostPlannedExpenses,true);
+assert.equal(roundtrip.incomeCategories.find(c=>c.name==='Side work').icon,'💰');
+const monthly={id:'rent',kind:'expense',name:'Rent',category:'Housing',accountId:'bank',amountCents:42000,startDate:'2026-10-31',repeat:'Monthly',lastPaidThrough:'2026-10-31',completed:false};
+const weekly={id:'weekly',kind:'expense',name:'Groceries',category:'Groceries',accountId:'bank',amountCents:9000,startDate:'2026-10-28',repeat:'Weekly',lastPaidThrough:'2026-10-28',completed:false};
+const once={id:'once',kind:'expense',name:'Special event',category:'Fun',accountId:'bank',amountCents:2500,startDate:'2026-11-14',repeat:'None',lastPaidThrough:null,completed:false};
+const income={id:'income',kind:'income',name:'Pay',category:'Salary',accountId:'bank',amountCents:65000,startDate:'2026-11-10',repeat:'Monthly',lastPaidThrough:null,completed:false};
+assert.equal(f.pendingOccurrencesInMonth(monthly,'2026-11-01').join(','),'2026-11-30');
+assert.equal(f.pendingOccurrencesInMonth(weekly,'2026-11-01').join(','),'2026-11-04,2026-11-11,2026-11-18,2026-11-25');
+assert.equal(f.pendingOccurrencesInMonth(income,'2026-11-01').length,0);
+let ledger={accounts:[bank],transactions:[],schedules:[monthly,weekly,once,income],categories:f.defaultCategories(),incomeCategories:f.defaultIncomeCategories(),mode:'personal',autoPostPlannedExpenses:true};
+const posted=f.postPlannedMonth(ledger,'2026-11-01');
+assert.equal(posted.transactions.length,6);
+assert(posted.transactions.every(t=>t.type==='expense' && t.date==='2026-11-01' && t.scheduleId && t.scheduledFor));
+assert.equal(posted.schedules.find(s=>s.id==='once').completed,true);
+assert.equal(posted.schedules.find(s=>s.id==='weekly').lastPaidThrough,'2026-11-25');
+assert.equal(f.dueDate(posted.schedules.find(s=>s.id==='weekly'),'2026-11-04'),'2026-12-02');
+assert.equal(f.dueDate(posted.schedules.find(s=>s.id==='rent'),'2026-11-04'),'2026-12-31');
+assert.strictEqual(f.postPlannedMonth(posted,'2026-11-01'),posted,'should not duplicate when run twice');
+assert.equal(f.periodTotals(posted.transactions,'2026-11-01','2026-11-30').expenses,42000+9000*4+2500);
+assert.equal(f.periodTotals(posted.transactions,'2026-11-01','2026-11-30').income,0);
+assert.equal(f.postPlannedMonth(posted,'2026-12-01').transactions.length,posted.transactions.length+1+5); // rent and 4 weeks
+const due={...income,due:'2026-11-10'};
+const recorded=f.applyRecordedPayment(posted,due,'2026-11-10');
+assert.equal(recorded.transactions.at(-1).type,'income');
+assert.equal(recorded.transactions.at(-1).scheduledFor,'2026-11-10');
+assert.equal(f.periodTotals(recorded.transactions,'2026-11-01','2026-11-30').income,65000);
+assert.strictEqual(f.applyRecordedPayment(recorded,due,'2026-11-10'),recorded,'income record must be idempotent');
+console.log('v0.5 icon, income category, plan-income and month-start posting tests passed.');
