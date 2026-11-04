@@ -1,66 +1,38 @@
-# Pocket Ledger v0.6 — Settings hub
+# Pocket Ledger v0.7 — Cash Flow Forecast
 
-Settings now opens a menu of separate detail pages rather than showing every adjustment on one screen:
+An offline-first personal finance app for iPhone and iPad, built using React Native and Expo. Track actual money movements manually and preview upcoming payments without recording them early.
 
-- **Planned expenses & income:** Set up the automatic month-ahead recording rule, record this month's eligible expenses on their scheduled dates, and create or edit planned expenses, income, and credit card repayments.
-- **Spending categories:** Add, rename, delete, and change icons for expense categories.
-- **Income categories:** Manage income categories separately.
-- **Accounts:** Manage bank, savings, cash, and credit-card account details.
-- **Automatic iCloud backup:** View backup status and limitations.
-- **Privacy & data:** Find information about local storage and the clear-all-records action.
+## What changed in v0.7
 
-The **Planned** tab still displays upcoming payments and supports tap-to-edit; its Manage control opens Settings → Planned expenses & income. The **Accounts** tab remains a balance overview with a Manage link into account Settings. Each Settings page has a back link to the main Settings menu.
+- **Planned → Forecast:** account-specific projections over 7, 14, 30, 60 or 90 days, including a daily chart, lowest projected balance, shortfall warnings and a conditional safe-to-spend estimate.
+- **Planned → Upcoming:** upcoming and overdue expenses, income and card repayments, with tap-to-confirm as an actual transaction, using today's date and preserving the original planned due date.
+- **Planned → Calendar:** monthly calendar of due dates, including linked payments already recorded.
+- **Settings → Accounts:** optional minimum-balance buffer for cash/bank accounts or minimum available credit for credit cards.
+- **No automatic first-of-month recording:** planned transactions stay projected until confirmed. Old settings are retired during migration.
+- **Historical figures and actual account balances exclude future-dated transactions**; future-dated actual entries appear in forecasts instead.
 
-This release reorganises navigation only. It preserves the v0.5.1 fix that pre-recorded planned expenses retain their actual scheduled transaction dates; it also preserves the existing storage key and automatic iCloud behaviour. Run `npm test` and verify navigation on an iOS build.
+## Accounting rules
 
----
+- Income and expenses are only actual after being entered or confirmed. Plans alone do not affect the recorded balance or historical spending totals.
+- Planned credit-card repayments are transfers; they reduce both bank cash and card debt, without counting as additional expense.
+- Every scheduled occurrence is linked by `(scheduleId, scheduledFor)` when confirmed, so it is not projected twice. Out-of-order payment confirmation does not hide earlier outstanding instalments.
+- Overdue obligations are projected as payable today; on a single date, expenses/repayments are conservatively applied before income.
+- Future-dated *actual* transactions are excluded from today's actual balance but are included on their dates in the forecast.
+- Older v0.5 first-of-month posts remain untouched; review them manually as the app cannot safely distinguish early recorded payments from real ones. Deleting/editing a linked transaction can change whether the corresponding plan appears pending.
+- A manually entered transaction without a plan link is not matched automatically. Mark the plan paid instead of entering a duplicate payment manually when possible.
 
-# Pocket Ledger v0.5.1 — Correct date of month-ahead planned expenses
+## How to use it
 
-## v0.5.1 correction — retain due dates
+1. Add a bank, savings, cash or credit-card account under **Settings → Accounts**. Record its opening balance (for cards, starting debt) and an optional buffer or credit limit.
+2. Enter actual income/expenses/transfers in **Activity** or using **+ Add transaction**.
+3. Create recurring bills, expected income and credit-card repayments under **Settings → Planned payments**.
+4. Open **Planned → Forecast**, select your account and horizon, and check any projected shortfalls.
+5. Open **Planned → Upcoming** and tap a scheduled item to **Record paid** when it actually happens; it then appears in Activity and no longer counts as a pending plan.
+6. Use **Planned → Calendar** to inspect due dates and linked paid items.
 
-The "Automatically record on the 1st" switch and "Record this month's expenses now" action now record every eligible expense for the month **with the transaction date set to its scheduled due date**. For example, weekly bills due on Nov 4/11/18/25 appear on Nov 4/11/18/25 in Activity, not together on Nov 1. The app pre-records them when opened; iOS does not guarantee execution while suspended. Linked schedule/due-date keys prevent duplicates on repeat runs.
+Forecasts are estimates based only on the information you entered, not verified balances from your bank. The safe-to-spend figure assumes expected income arrives, all planned payments occur, and you incur no unplanned costs. Do not use it as a guaranteed spending allowance.
 
-**Already posted records:** Transactions created by v0.5 and dated incorrectly on the first remain unchanged to avoid silently modifying genuine early payments. You can edit their dates manually. **Balance caveat:** Future-dated expenses are still included in current account balances by the existing accounting implementation.
-
-Pocket Ledger remains a manual, offline-first personal finance tracker built with React Native and Expo.
-
-## New in v0.5
-
-- Select emoji icons for expense and income categories, add/rename/delete both types via the new **Settings → Spending / Income** category tabs. Category colour selectors are removed. Older stored colours remain valid for chart and backup compatibility.
-- Activity rows now show category icons, description, account and amount without repeated type labels. Expenses are red, income green, and transfers neutral.
-- Planned entries now support income in addition to expenses and credit-card repayments, with filter tabs and tap-to-edit details. Record or delete individual planned entries from their editor.
-- Optional **Automatically record on the 1st** setting. When enabled, the app pre-records this month's remaining planned expense occurrences, each with its own scheduled transaction date, when it opens. Weekly/fortnightly occurrences are included, but income and card repayments are not auto-posted.
-- A separate **Record this month's expenses now** button posts remaining eligible expenses after confirmation.
-- Planned postings are linked to schedule IDs and original due dates to prevent duplicate posting. Upcoming due dates skip already posted future occurrences.
-- Legacy local data and existing iCloud backup format remain supported.
-
-**Accounting caution:** Choosing to pre-record bills for the month creates future-dated transactions. These affect current displayed balances even before the real due dates because balances currently include future entries; this is not proof of a bank payment. Check for manually recorded duplicate expenses before enabling. This feature does not pay bills or contact banks.
-
-## Testing and iCloud
-
-Run `npm install`, `npm test`, and `npx expo-doctor`; test a signed native iOS build before using real financial data. Automatic iCloud backup from v0.4 requires Apple Developer signing and iCloud entitlements; Expo Go cannot access the native module. Backups are not separately password-encrypted.
-
---- 
-
-## v0.4 iCloud setup and background
-
-Pocket Ledger is a React Native + Expo (SDK 57) manual personal finance tracker for iPhone and iPad. Account balances, credit cards, categories, transactions, spending insights and recurring payments remain available.
-
-## New in v0.4
-
-- Automatically writes a versioned snapshot to the app's private iCloud Drive container after successful local saves, then retries failed uploads when the app reopens or remains active.
-- Keeps three rotating snapshots per installation, with separate names per device.
-- If a new installation has no local financial data, automatically tries to recover the newest *valid* iCloud snapshot. **Never overwrites existing on-device data.**
-- Removes the manual export, sharing, file picker and restore buttons.
-- Displays iCloud status and the last app-side save time under Accounts.
-
-## iCloud setup (required)
-
-1. Use an Apple Developer account with iCloud capability. A proposed iOS bundle ID, `com.jacentzhou.pocketledger`, is specified in app.json. Confirm or change it **before your first signed build**. The bundle ID becomes tied to the app identity and iCloud container.
-2. Enable iCloud Documents for that App ID in Apple Developer and associate a matching iCloud container. The Expo config plugin uses `iCloud.$(CFBundleIdentifier)` and `ios.usesIcloudStorage: true`.
-3. On the iPhone or iPad, sign in to an Apple Account and enable iCloud Drive.
-4. Install a **signed native EAS/Xcode build**, not Expo Go. From a cloud terminal or Codex environment:
+## Install, test and build
 
 ```sh
 npm install
@@ -69,25 +41,20 @@ npx expo-doctor
 npx eas-cli build --platform ios --profile preview
 ```
 
-An internal iOS build needs appropriate Apple provisioning and registration for the test device. The Apple Developer login/capability approval must be completed by the app owner. Native iCloud cannot be tested in Expo Go.
+The native iCloud module needs a properly signed iOS build. Expo Go cannot exercise it.
 
-## Safety and limitations
+The package uses `@oleg_svetlichnyi/expo-icloud-storage` (native iOS) and Expo SDK 57. The Expo configuration declares a proposed bundle identifier `com.jacentzhou.pocketledger`; confirm this identity before the first signed build. Enable iCloud Documents for the App ID and a matching iCloud container in Apple Developer, and turn on iCloud Drive on the device.
 
-- **This is opportunistic automatic backup while the app runs**, not a guaranteed background job while iOS has suspended or terminated it. Upload attempts occur after edits, on app activation and periodically during an active session after failure.
-- An upload success means iOS accepted the file into its iCloud container. Propagation to another device is controlled by Apple. Do not treat the app-side timestamp as proof of off-device delivery.
-- On first installation, recovery only runs if no local data exists. There is no multi-device merging or real-time sync. Each device's rotating snapshots are kept separately.
-- Older snapshots can remain after Clear all records; the newest empty ledger is backed up automatically. This is not an iCloud data-erasure feature.
-- Backups are **readable JSON**, not separately password-encrypted by Pocket Ledger. Local AsyncStorage is also not independently encrypted. Test with fictional records before using real financial information.
-- Demo data are not uploaded to iCloud. No banking credentials or app-operated servers are involved.
-- No manual backup or manual restore controls are provided in v0.4.
+## iCloud and privacy
+
+- Records persist locally with AsyncStorage using the existing `pocket-ledger-v1` key. Old account, category, transaction, and schedule data remain compatible.
+- Automatic iCloud snapshots from v0.4 continue after local saves and on app activation. They do not guarantee uploads while iOS fully suspends the app, and are not real-time multi-device sync.
+- A fresh installation without local data tries to restore the newest valid snapshot; it does not overwrite an existing ledger.
+- Backups are readable JSON in the private app iCloud container and are **not independently password-encrypted**. Do not put actual bank credentials or financial exports into the GitHub repository.
+- This build has passed source parsing and pure regression tests, but native iCloud transfer, backup recovery and the complete UI still need signed-device testing before use with real financial records.
 
 ## Tests
 
-Run `npm test` for the existing finance calculations, credit card accounting, transaction grouping, backup schema, and new snapshot naming/rotation/date-selection regression tests. The iCloud transport itself, Apple entitlements, cross-install recovery and propagation **still require real-device testing**.
+`npm test` runs the existing finance, iCloud backup, category and recurring-plan tests plus `test-forecast.cjs` for future-dated actuals, shortfalls, buffers, credit-card repayments, calendar entries, duplicate prevention and out-of-order payment confirmation.
 
-## Development notes
-
-- iCloud module: `@oleg_svetlichnyi/expo-icloud-storage` (native iOS; compatible with Expo SDK 53+).
-- iCloud snapshots: `PocketLedgerAutomaticBackups/backup-<installation-id>-slotN.json` in the app's private iCloud Documents container.
-- Shared finance storage key remains `pocket-ledger-v1`, preserving data from v0.1–v0.3.
-- Do not commit real account or transaction records, credentials, or backups to GitHub.
+The previous month-posting pure helper is intentionally retained to support legacy tests, but it is **not wired to the UI or executed automatically**.
