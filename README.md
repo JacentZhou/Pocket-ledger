@@ -1,3 +1,20 @@
+# Pocket Ledger v0.6 — Settings hub
+
+Settings now opens a menu of separate detail pages rather than showing every adjustment on one screen:
+
+- **Planned expenses & income:** Set up the automatic month-ahead recording rule, record this month's eligible expenses on their scheduled dates, and create or edit planned expenses, income, and credit card repayments.
+- **Spending categories:** Add, rename, delete, and change icons for expense categories.
+- **Income categories:** Manage income categories separately.
+- **Accounts:** Manage bank, savings, cash, and credit-card account details.
+- **Automatic iCloud backup:** View backup status and limitations.
+- **Privacy & data:** Find information about local storage and the clear-all-records action.
+
+The **Planned** tab still displays upcoming payments and supports tap-to-edit; its Manage control opens Settings → Planned expenses & income. The **Accounts** tab remains a balance overview with a Manage link into account Settings. Each Settings page has a back link to the main Settings menu.
+
+This release reorganises navigation only. It preserves the v0.5.1 fix that pre-recorded planned expenses retain their actual scheduled transaction dates; it also preserves the existing storage key and automatic iCloud behaviour. Run `npm test` and verify navigation on an iOS build.
+
+---
+
 # Pocket Ledger v0.5.1 — Correct date of month-ahead planned expenses
 
 ## v0.5.1 correction — retain due dates
