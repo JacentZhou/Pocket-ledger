@@ -2,10 +2,14 @@
   "expo": {
     "name": "Pocket Ledger",
     "slug": "pocket-ledger",
-    "version": "0.1.0",
+    "version": "0.3.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
-    "ios": { "supportsTablet": true },
-    "android": { "package": "com.example.pocketledger" }
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.example.pocketledger"
+    }
   }
 }
