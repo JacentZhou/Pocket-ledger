@@ -1,4 +1,10 @@
-# Pocket Ledger v0.5 — Category icons and monthly planned posting
+# Pocket Ledger v0.5.1 — Correct date of month-ahead planned expenses
+
+## v0.5.1 correction — retain due dates
+
+The "Automatically record on the 1st" switch and "Record this month's expenses now" action now record every eligible expense for the month **with the transaction date set to its scheduled due date**. For example, weekly bills due on Nov 4/11/18/25 appear on Nov 4/11/18/25 in Activity, not together on Nov 1. The app pre-records them when opened; iOS does not guarantee execution while suspended. Linked schedule/due-date keys prevent duplicates on repeat runs.
+
+**Already posted records:** Transactions created by v0.5 and dated incorrectly on the first remain unchanged to avoid silently modifying genuine early payments. You can edit their dates manually. **Balance caveat:** Future-dated expenses are still included in current account balances by the existing accounting implementation.
 
 Pocket Ledger remains a manual, offline-first personal finance tracker built with React Native and Expo.
 
@@ -7,12 +13,12 @@ Pocket Ledger remains a manual, offline-first personal finance tracker built wit
 - Select emoji icons for expense and income categories, add/rename/delete both types via the new **Settings → Spending / Income** category tabs. Category colour selectors are removed. Older stored colours remain valid for chart and backup compatibility.
 - Activity rows now show category icons, description, account and amount without repeated type labels. Expenses are red, income green, and transfers neutral.
 - Planned entries now support income in addition to expenses and credit-card repayments, with filter tabs and tap-to-edit details. Record or delete individual planned entries from their editor.
-- Optional **Automatically record on the 1st** setting. When enabled, the app posts this month's remaining planned expense occurrences as transactions dated on the first of the month when it opens. Weekly/fortnightly occurrences are included, but income and card repayments are not auto-posted.
+- Optional **Automatically record on the 1st** setting. When enabled, the app pre-records this month's remaining planned expense occurrences, each with its own scheduled transaction date, when it opens. Weekly/fortnightly occurrences are included, but income and card repayments are not auto-posted.
 - A separate **Record this month's expenses now** button posts remaining eligible expenses after confirmation.
 - Planned postings are linked to schedule IDs and original due dates to prevent duplicate posting. Upcoming due dates skip already posted future occurrences.
 - Legacy local data and existing iCloud backup format remain supported.
 
-**Accounting caution:** Choosing to post bills on the first of the month immediately changes balances, spending charts, and cash flow, even when the actual bills have not been paid yet. Check for manually recorded duplicate expenses before enabling. This feature does not pay bills or contact banks.
+**Accounting caution:** Choosing to pre-record bills for the month creates future-dated transactions. These affect current displayed balances even before the real due dates because balances currently include future entries; this is not proof of a bank payment. Check for manually recorded duplicate expenses before enabling. This feature does not pay bills or contact banks.
 
 ## Testing and iCloud
 
