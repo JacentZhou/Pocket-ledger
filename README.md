@@ -1,80 +1,48 @@
-# Pocket Ledger v0.3 — manual personal finance tracker
+# Pocket Ledger v0.4 — Automatic iCloud backup
 
-A React Native + Expo (SDK 57) app for recording bank/savings/cash/credit-card accounts, manually entered income/expenses/transfers, planned payments and financial insights. The primary data stays on this device in AsyncStorage. No bank credentials, banking API, application server or AI service is used. Defaults: AUD and Monday-start weeks.
+Pocket Ledger is a React Native + Expo (SDK 57) manual personal finance tracker for iPhone and iPad. Account balances, credit cards, categories, transactions, spending insights and recurring payments remain available.
 
-## New in v0.3
+## New in v0.4
 
-### Manually back up to iCloud Drive; restore from Files
+- Automatically writes a versioned snapshot to the app's private iCloud Drive container after successful local saves, then retries failed uploads when the app reopens or remains active.
+- Keeps three rotating snapshots per installation, with separate names per device.
+- If a new installation has no local financial data, automatically tries to recover the newest *valid* iCloud snapshot. **Never overwrites existing on-device data.**
+- Removes the manual export, sharing, file picker and restore buttons.
+- Displays iCloud status and the last app-side save time under Accounts.
 
-**Export:** On **Accounts → Backup and restore → Back up to Files / iCloud Drive**, the app generates a dated `pocket-ledger-YYYY-MM-DD-<timestamp>.json` backup and opens the iOS share sheet. Choose **Save to Files**, select **iCloud Drive**, choose a folder and tap **Save**. Open the Files app to verify the backup is there. You can save to **On My iPad** instead if you prefer.
+## iCloud setup (required)
 
-**Restore:** On **Accounts → Restore a backup** (or **Restore from Files / iCloud Drive** on the empty welcome screen), choose the file in the iOS Files picker. The app checks the backup's version, accounts, transaction amounts/dates/times, IDs, and account links. It then asks you to confirm replacing the current on-device data. Confirming replaces your accounts, transactions, categories and scheduled payments; cancel keeps the current data. Invalid backups don't replace existing data.
+1. Use an Apple Developer account with iCloud capability. A proposed iOS bundle ID, `com.jacentzhou.pocketledger`, is specified in app.json. Confirm or change it **before your first signed build**. The bundle ID becomes tied to the app identity and iCloud container.
+2. Enable iCloud Documents for that App ID in Apple Developer and associate a matching iCloud container. The Expo config plugin uses `iCloud.$(CFBundleIdentifier)` and `ios.usesIcloudStorage: true`.
+3. On the iPhone or iPad, sign in to an Apple Account and enable iCloud Drive.
+4. Install a **signed native EAS/Xcode build**, not Expo Go. From a cloud terminal or Codex environment:
 
-**Important limitations:** This is an **on-demand export to iCloud Drive**, not automatic iCloud sync or silent scheduled backup. The sharing API cannot determine whether you actually saved the file, so confirm its presence in Files. **The `.json` backup is readable plaintext, not password-encrypted.** Do not share or publicly upload it. Keep backups in a private location. Do not use the prototype for important financial records before adding password-encrypted backups, an encrypted local database, and end-to-end QA. Cloud files may be accessible to anyone with access to the Apple Account or shared iCloud folder. Backups do not contain bank passwords because the app does not collect them.
-
-### Transaction time
-
-- Every **new** manually entered transaction defaults to the device's current local time in `HH:mm` 24-hour format (captured when you open the New transaction form). You can edit both date and time before saving and any time later.
-- Recording a planned payment uses the date and time when **Record paid** was tapped.
-- Older v0.1/v0.2 transactions remain intact but have `time: null`, because their original entry time was never saved. No fake time is assigned. When you edit one, you can fill in a known time or leave it blank.
-- Entries are sorted by date, then time (newest first). The timestamp is searchable. No timezone conversion is applied: the saved time is local wall-clock time.
-
-### Compact, grouped Activity page
-
-- **Activity** shows a compact search bar, transaction-type chips, and an expandable **More filters** section (account, category, date range, amount range).
-- Entries are grouped under day headings (e.g. **Wed, 4 Nov 2026**). Each heading shows the sum of **Out** (expenses) and **In** (income) for that date. These sums apply to transactions currently included by the search/filter. Internal transfers do not affect either sum.
-- Rows display **description, type, account(s), and amount only**, with no repetitive date, Edit, or Delete text. Tap any transaction to edit it. The **Delete this transaction** button appears inside its edit form with a confirmation prompt.
-- Tightened Activity page spacing, smaller row icons and text, and roughly 46-pixel transaction rows aim for approximately 8–10 visible entries on typical tablet screens, depending on height, device font scale, and number of date headings.
-
-## Existing features from v0.2
-
-- Create and edit account balances; track credit-card debt, credit limit and repayments. A card purchase counts as spending; repayment is a transfer and doesn't count as spending twice.
-- Add, edit, recolour or delete expense categories; 24 preset colours.
-- Record manual expenses, income and transfers and filter by type, date, account, category, amount or description.
-- Record scheduled/repeating payments (weekly, fortnightly, monthly, yearly).
-- Weekly, monthly, year-to-date and custom date-range insights and graphs.
-
-## Update your existing GitHub repo from an iPad
-
-1. Extract `pocket-ledger-v0.3.zip` in Files.
-2. In your existing **private** `pocket-ledger` repository, replace the contents of `App.js`, `README.md`, `test-calculations.cjs`, `package.json` and `app.json` with the new versions. Don't create a new repository; don't upload the ZIP itself as the source tree.
-3. Open **Codex** with that repo and ask it to run `npm install`, `npm test`, `npx expo install --check` and `npx expo start --tunnel`, correcting dependency/version issues if necessary.
-4. Install Expo Go on your iPad and open the Expo project over the published tunnel. For full iOS release testing use an Expo EAS build.
-5. Test backup **export → Save to Files → Files verification → restore** using *fictional data* before relying on the feature. Also test with an already populated app, because restore replaces the local data.
-
-### Local Node.js commands
-
-```bash
+```sh
 npm install
 npm test
-npx expo install --check
-npx expo start --tunnel
+npx expo-doctor
+npx eas-cli build --platform ios --profile preview
 ```
 
-SDK 57 dependency additions in v0.3:
+An internal iOS build needs appropriate Apple provisioning and registration for the test device. The Apple Developer login/capability approval must be completed by the app owner. Native iCloud cannot be tested in Expo Go.
 
-```json
-{
-  "expo-file-system": "~57.0.7",
-  "expo-sharing": "~57.0.24",
-  "expo-document-picker": "~57.0.3"
-}
-```
+## Safety and limitations
 
-Previewing via Snack requires adding **all four** native/Expo packages (AsyncStorage, FileSystem, Sharing, DocumentPicker) through the Snack dependency UI. Browser (web) preview cannot export local files through the native iOS share sheet; backup/restore is intended for iPhone/iPad. Validate the final dependency compatibility with `expo install --check` in Codex.
+- **This is opportunistic automatic backup while the app runs**, not a guaranteed background job while iOS has suspended or terminated it. Upload attempts occur after edits, on app activation and periodically during an active session after failure.
+- An upload success means iOS accepted the file into its iCloud container. Propagation to another device is controlled by Apple. Do not treat the app-side timestamp as proof of off-device delivery.
+- On first installation, recovery only runs if no local data exists. There is no multi-device merging or real-time sync. Each device's rotating snapshots are kept separately.
+- Older snapshots can remain after Clear all records; the newest empty ledger is backed up automatically. This is not an iCloud data-erasure feature.
+- Backups are **readable JSON**, not separately password-encrypted by Pocket Ledger. Local AsyncStorage is also not independently encrypted. Test with fictional records before using real financial information.
+- Demo data are not uploaded to iCloud. No banking credentials or app-operated servers are involved.
+- No manual backup or manual restore controls are provided in v0.4.
 
-## Accounting rules
+## Tests
 
-- Asset balance = opening balance + income − expenses − transfers out + transfers in.
-- Credit card debt owed = opening debt − credits/refunds + purchases + transfers out − transfers in.
-- Net worth = asset balances − credit card amounts owed.
-- Spending and income summaries exclude transfers and unpaid planned payments.
-- Refund-category income is treated as income rather than negative spending.
-- Scheduled payments are forecasts until explicitly recorded as expenses or transfers.
-- Opening balances represent the balance *before* your first recorded transaction; avoid double-counting earlier transactions.
+Run `npm test` for the existing finance calculations, credit card accounting, transaction grouping, backup schema, and new snapshot naming/rotation/date-selection regression tests. The iCloud transport itself, Apple entitlements, cross-install recovery and propagation **still require real-device testing**.
 
-## Security and testing
+## Development notes
 
-The local storage (AsyncStorage) is not independently encrypted; exported files are JSON plaintext. There is no passcode/biometric lock, automated iCloud sync, encrypted cloud backup, bank integration or multi-device conflict resolution. Files on GitHub should only contain code and fictional test data, never your real exported backups or personal banking information. Use a private GitHub repository but do not assume the privacy of that repository makes banking data safe to commit.
-
-`npm test` verifies calculations, credit-card repayment semantics, transaction grouping and daily sums, time parsing and sort order, old-data migration, transaction search and backup validation/round-trip. The JSX syntax is also checked separately. **The app has not been run on a physical iPad in this environment**, so iOS share-sheet behaviour and the picker must be tested in Expo Go or an EAS build before trusting backups.
+- iCloud module: `@oleg_svetlichnyi/expo-icloud-storage` (native iOS; compatible with Expo SDK 53+).
+- iCloud snapshots: `PocketLedgerAutomaticBackups/backup-<installation-id>-slotN.json` in the app's private iCloud Documents container.
+- Shared finance storage key remains `pocket-ledger-v1`, preserving data from v0.1–v0.3.
+- Do not commit real account or transaction records, credentials, or backups to GitHub.
