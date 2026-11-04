@@ -26,10 +26,20 @@ function parseTime(value) {
 const NAV = [
   ['home', '⌂', 'Overview'], ['transactions', '↔', 'Activity'],
   ['schedule', '◷', 'Planned'], ['analytics', '▥', 'Insights'],
-  ['accounts', '▤', 'Accounts'],
+  ['accounts', '▤', 'Accounts'], ['settings', '⚙', 'Settings'],
 ];
 const EXPENSE_CATEGORIES = ['Groceries', 'Dining', 'Transport', 'Shopping', 'Housing', 'Bills', 'Health', 'Fun', 'Other'];
 const INCOME_CATEGORIES = ['Salary', 'Refund', 'Gift', 'Interest', 'Other'];
+const CATEGORY_ICONS = {
+  Groceries:'🛒', Dining:'🍽️', Transport:'🚌', Shopping:'🛍️', Housing:'🏠', Bills:'🧾',
+  Health:'💊', Fun:'🎮', Other:'📦', Salary:'💼', Refund:'↩️', Gift:'🎁', Interest:'🏦', Transfer:'🔁',
+};
+const ICON_CHOICES = [
+  '🛒','🍽️','☕','🥗','🍕','🚌','🚗','🚕','🚲','✈️','⛽','🛍️','👕','💻','📱',
+  '🏠','🔑','🧾','💡','📶','💊','🏥','🦷','🎮','🎬','🎵','🏋️','⚽','🐈','🐕',
+  '📚','🎓','💼','💰','🏦','💵','🎁','↩️','📈','📉','🔁','🪙','🧰','🔧','🌿',
+  '👨‍👩‍👧','💖','📦','⭐','🎯','🚀','🧳','🏖️','💳','💸','💻','📷',
+];
 const CATEGORY_COLORS = {
   Groceries: '#5A96E9', Dining: '#E18B5E', Transport: '#8B80D9', Shopping: '#DB6B9B',
   Housing: '#54AF9A', Bills: '#BC9B47', Health: '#54B4BC', Fun: '#9B76C9', Other: '#8692A6',
@@ -41,18 +51,40 @@ const ACCOUNT_COLORS = [
   '#A67ED7', '#CE75BE', '#745F94', '#A47A65', '#485C66', '#E47555',
   '#BB557A', '#2A8B75', '#7D929D', '#D2A24E', '#7056C8', '#E0779A',
 ];
-const defaultCategories = () => EXPENSE_CATEGORIES.map(name => ({ name, color: CATEGORY_COLORS[name] || ACCOUNT_COLORS[0] }));
+const defaultCategories = () => EXPENSE_CATEGORIES.map(name => ({ name, icon: CATEGORY_ICONS[name] || '📦', color: CATEGORY_COLORS[name] || ACCOUNT_COLORS[0] }));
+const defaultIncomeCategories = () => INCOME_CATEGORIES.map(name => ({ name, icon: CATEGORY_ICONS[name] || '💰' }));
+function normalizeCategoryList(input, defaults, type) {
+  const items = Array.isArray(input) ? input.filter(c => c && typeof c.name === 'string' && c.name.trim()) : defaults;
+  const names = new Set();
+  const normalized = items.filter(c => {
+    const name = c.name.trim().toLowerCase();
+    if (names.has(name)) return false;
+    names.add(name); return true;
+  }).map(c => ({ name:c.name.trim(), icon: typeof c.icon === 'string' && c.icon.trim() ? c.icon : CATEGORY_ICONS[c.name] || (type === 'income' ? '💰' : '📦'),
+    ...(type === 'expense' ? { color: c.color || CATEGORY_COLORS[c.name] || ACCOUNT_COLORS[0] } : {}) }));
+  if (!normalized.some(c => c.name === 'Other')) normalized.push({ name:'Other', icon:'📦', ...(type === 'expense' ? {color:CATEGORY_COLORS.Other} : {}) });
+  return normalized;
+}
 function normalizeData(d) {
-  const existing = Array.isArray(d.categories) ? d.categories.filter(c => c && typeof c.name === 'string' && c.name.trim()).map(c => ({ name: c.name, color: c.color || CATEGORY_COLORS[c.name] || ACCOUNT_COLORS[0] })) : defaultCategories();
-  // Preserve user-defined legacy categories even if they have no palette entry.
-  for (const t of [...d.transactions, ...d.schedules]) {
-    if (t.type === 'income' || t.type === 'transfer' || t.kind === 'card_payment') continue;
-    if (t.category && !existing.some(c => c.name === t.category)) existing.push({ name: t.category, color: CATEGORY_COLORS[t.category] || ACCOUNT_COLORS[0] });
+  const accounts = Array.isArray(d.accounts) ? d.accounts : [];
+  const transactions = Array.isArray(d.transactions) ? d.transactions : [];
+  const schedules = Array.isArray(d.schedules) ? d.schedules : [];
+  const categories = normalizeCategoryList(d.categories, defaultCategories(), 'expense');
+  const incomeCategories = normalizeCategoryList(d.incomeCategories, defaultIncomeCategories(), 'income');
+  // Legacy category colours remain readable, but category editing now uses icons.
+  // Preserve previously used names on both transaction types.
+  for (const item of [...transactions, ...schedules]) {
+    const kind = item.type || item.kind || 'expense';
+    if (kind !== 'expense' && kind !== 'income') continue;
+    const list = kind === 'income' ? incomeCategories : categories;
+    if (item.category && !list.some(c => c.name === item.category)) {
+      list.push({ name:item.category, icon:CATEGORY_ICONS[item.category] || (kind === 'income' ? '💰' : '📦'),
+        ...(kind === 'expense' ? {color:CATEGORY_COLORS[item.category] || ACCOUNT_COLORS[0]} : {}) });
+    }
   }
-  if (!existing.some(c => c.name === 'Other')) existing.push({ name: 'Other', color: CATEGORY_COLORS.Other });
-  return { ...d, categories: existing,
-    transactions: d.transactions.map(t => ({ ...t, time: parseTime(t.time) || null })),
-    accounts: d.accounts.map(a => ({ ...a, creditLimitCents: Number.isSafeInteger(a.creditLimitCents) ? a.creditLimitCents : 0 })) };
+  return { ...d, categories, incomeCategories, autoPostPlannedExpenses: !!d.autoPostPlannedExpenses,
+    transactions: transactions.map(t => ({ ...t, time: parseTime(t.time) || null })),
+    accounts: accounts.map(a => ({ ...a, creditLimitCents: Number.isSafeInteger(a.creditLimitCents) ? a.creditLimitCents : 0 })) };
 }
 const REPEATS = ['None', 'Weekly', 'Fortnightly', 'Monthly', 'Yearly'];
 const money = (cents) => new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD' }).format(cents / 100);
@@ -184,34 +216,78 @@ function categoryTotals(transactions, start, end) {
 }
 function dueDate(schedule, now) {
   if (schedule.completed) return null;
-  if (schedule.repeat === 'None') return schedule.startDate;
   const anchor = schedule.startDate;
-  if (anchor > now && (!schedule.lastPaidThrough || schedule.lastPaidThrough < anchor)) return anchor;
-  let last = anchor, next = anchor;
-  // Always calculate from the original anchor: monthly payments on the 31st
-  // will not permanently drift to the 28th after February.
+  if (schedule.repeat === 'None') return schedule.lastPaidThrough && schedule.lastPaidThrough >= anchor ? null : anchor;
+  const cutoff = schedule.lastPaidThrough || '';
+  let overdue = null;
   for (let i = 0; i < 2500; i++) {
-    next = schedule.repeat === 'Weekly' ? shiftDays(anchor, (i + 1) * 7)
-      : schedule.repeat === 'Fortnightly' ? shiftDays(anchor, (i + 1) * 14)
-      : schedule.repeat === 'Monthly' ? monthOffset(anchor, i + 1)
-      : monthOffset(anchor, (i + 1) * 12);
-    if (next > now) break;
-    last = next;
+    const when = schedule.repeat === 'Weekly' ? shiftDays(anchor, i * 7)
+      : schedule.repeat === 'Fortnightly' ? shiftDays(anchor, i * 14)
+      : schedule.repeat === 'Monthly' ? monthOffset(anchor, i)
+      : monthOffset(anchor, i * 12);
+    if (when <= cutoff) continue; // Also skip future items posted early on the 1st.
+    if (when > now) return overdue || when;
+    overdue = when;
   }
-  return !schedule.lastPaidThrough || last > schedule.lastPaidThrough ? last : next;
+  return overdue;
 }
 function applyRecordedPayment(data, schedule, date) {
   const isRepayment = schedule.kind === 'card_payment';
-  const tx = { id: uid(), date, time: timeNow(), type: isRepayment ? 'transfer' : 'expense',
+  const type = isRepayment ? 'transfer' : schedule.kind === 'income' ? 'income' : 'expense';
+  const occurrence = schedule.due || schedule.startDate;
+  // The schedule id + original due date help prevent duplicate bulk postings.
+  if (data.transactions.some(t => t.scheduleId === schedule.id && t.scheduledFor === occurrence)) return data;
+  const tx = { id: uid(), date, time: timeNow(), type,
     amountCents: schedule.amountCents, category: isRepayment ? 'Transfer' : schedule.category,
     description: schedule.name, accountId: schedule.accountId,
-    toAccountId: isRepayment ? schedule.toAccountId : null };
+    toAccountId: isRepayment ? schedule.toAccountId : null,
+    scheduleId: schedule.id, scheduledFor: occurrence };
   return {
     ...data, transactions: [...data.transactions, tx],
     schedules: data.schedules.map(s => s.id === schedule.id ? {
-      ...s, lastPaidThrough: schedule.due, completed: schedule.repeat === 'None',
+      ...s, lastPaidThrough: occurrence, completed: schedule.repeat === 'None',
     } : s),
   };
+}
+function pendingOccurrencesInMonth(schedule, monthStart) {
+  if (schedule.completed || (schedule.kind || 'expense') !== 'expense') return [];
+  const monthEnd = monthOffset(monthStart, 1);
+  const end = shiftDays(monthEnd, -1);
+  const start = schedule.startDate;
+  if (!parseDate(start) || start > end) return [];
+  const result = [];
+  for (let index = 0; index < 2500; index++) {
+    const when = schedule.repeat === 'None' ? start
+      : schedule.repeat === 'Weekly' ? shiftDays(start, index * 7)
+      : schedule.repeat === 'Fortnightly' ? shiftDays(start, index * 14)
+      : schedule.repeat === 'Monthly' ? monthOffset(start, index)
+      : monthOffset(start, index * 12);
+    if (when > end) break;
+    if (when >= monthStart && (!schedule.lastPaidThrough || when > schedule.lastPaidThrough)) result.push(when);
+    if (schedule.repeat === 'None') break;
+  }
+  return result;
+}
+function postPlannedMonth(data, monthStart) {
+  // Explicitly posting future expenses on day 1 affects that month's spending figures.
+  // Repeat occurrences are individually linked so posting again is idempotent.
+  if (!parseDate(monthStart) || !monthStart.endsWith('-01')) return data;
+  const newTransactions = [];
+  const nextSchedules = data.schedules.map(schedule => {
+    const pending = pendingOccurrencesInMonth(schedule, monthStart);
+    if (!pending.length) return schedule;
+    const existingKeys = new Set([...data.transactions, ...newTransactions]
+      .filter(t => t.scheduleId === schedule.id).map(t => t.scheduledFor));
+    const fresh = pending.filter(when => !existingKeys.has(when));
+    if (!fresh.length) return schedule;
+    for (const when of fresh) newTransactions.push({ id:uid(), type:'expense', date:monthStart,
+      time:timeNow(), amountCents:schedule.amountCents, category:schedule.category,
+      description:schedule.name, accountId:schedule.accountId, toAccountId:null,
+      scheduleId:schedule.id, scheduledFor:when });
+    const last = fresh[fresh.length - 1];
+    return {...schedule, lastPaidThrough:last, completed:schedule.repeat === 'None'};
+  });
+  return newTransactions.length ? {...data, transactions:[...data.transactions,...newTransactions], schedules:nextSchedules} : data;
 }
 const recentSort = tx => [...tx].sort((a, b) =>
   b.date.localeCompare(a.date) ||
@@ -266,18 +342,22 @@ function readBackup(raw) {
     && parseDate(sc.startDate) && REPEATS.includes(sc.repeat) && ids.has(sc.accountId)
     && ((sc.kind || 'expense') !== 'card_payment' || ids.has(sc.toAccountId))))
     throw new Error('The backup contains an invalid planned payment.');
-  if (d.categories !== undefined && (!Array.isArray(d.categories) || d.categories.length > 500
-    || !d.categories.every(c => c && typeof c.name === 'string' && typeof c.color === 'string')))
-    throw new Error('The backup contains invalid categories.');
+  const validCategoryList = (list, requiresLegacyColour) => Array.isArray(list) && list.length <= 500
+    && list.every(c => c && typeof c.name === 'string' && c.name.trim()
+      && (!('icon' in c) || typeof c.icon === 'string')
+      && (!requiresLegacyColour || !('color' in c) || typeof c.color === 'string'));
+  if (d.categories !== undefined && !validCategoryList(d.categories, true)) throw new Error('The backup contains invalid spending categories.');
+  if (d.incomeCategories !== undefined && !validCategoryList(d.incomeCategories, false)) throw new Error('The backup contains invalid income categories.');
+  if (d.autoPostPlannedExpenses !== undefined && typeof d.autoPostPlannedExpenses !== 'boolean') throw new Error('The backup contains invalid settings.');
   return normalizeData(d);
 }
-const empty = () => ({ accounts: [], transactions: [], schedules: [], categories: defaultCategories(), mode: 'personal' });
+const empty = () => ({ accounts: [], transactions: [], schedules: [], categories: defaultCategories(), incomeCategories: defaultIncomeCategories(), autoPostPlannedExpenses:false, mode: 'personal' });
 function demo() {
   const now = today();
   const checking = 'demo-everyday', savings = 'demo-savings';
   return {
     mode: 'demo',
-    categories: defaultCategories(),
+    categories: defaultCategories(), incomeCategories: defaultIncomeCategories(), autoPostPlannedExpenses:false,
     accounts: [
       { id: checking, name: 'Everyday', kind: 'Bank', openingCents: 460000, color: '#4D63E8' },
       { id: savings, name: 'Savings', kind: 'Savings', openingCents: 1450000, color: '#139C99' },
@@ -332,27 +412,24 @@ function Metric({ label, value, color }) {
 function EmptyMessage({ title, detail }) {
   return <View style={styles.empty}><Text style={{ fontSize: 28, marginBottom: 7 }}>◌</Text><Text style={styles.emptyTitle}>{title}</Text><Text style={styles.subtleCenter}>{detail}</Text></View>;
 }
-function TxRow({ t, accountName, destinationName, onEdit, color }) {
+function TxRow({ t, accountName, destinationName, onEdit, icon }) {
   const isExpense = t.type === 'expense'; const isIncome = t.type === 'income';
-  const symbol = isExpense ? '−' : isIncome ? '+' : '↔';
   const typeLabel = isExpense ? 'Expense' : isIncome ? 'Income' : 'Transfer';
   const accountLabel = t.type === 'transfer' ? `${accountName} → ${destinationName || 'Unknown account'}` : accountName;
   return <Pressable onPress={onEdit} accessibilityRole="button"
     accessibilityLabel={`Edit ${typeLabel.toLowerCase()}, ${t.description}, ${money(t.amountCents)}, ${t.date}${t.time ? ` at ${t.time}` : ''}`}
     style={styles.listRow}>
-    <View style={[styles.txIcon, { backgroundColor: `${color || CATEGORY_COLORS[t.category] || C.blue}20` }]}>
-      <Text style={{ color: color || CATEGORY_COLORS[t.category] || C.blue, fontWeight: '800', fontSize: 16 }}>{symbol}</Text>
-    </View>
+    <View style={styles.txIcon}><Text style={{fontSize:18}}>{icon || '📦'}</Text></View>
     <View style={{ flex: 1, minWidth: 0 }}>
-      <Text style={styles.rowTitle} numberOfLines={1}>{t.description || typeLabel}</Text>
-      <Text style={styles.rowSubtitle} numberOfLines={1}>{typeLabel} · {accountLabel}</Text>
+      <Text style={styles.rowTitle} numberOfLines={1}>{t.description || t.category || typeLabel}</Text>
+      <Text style={styles.rowSubtitle} numberOfLines={1}>{accountLabel}</Text>
     </View>
-    <Text style={[styles.rowAmount, { color: isExpense ? C.ink : isIncome ? C.green : C.mute }]} numberOfLines={1}>
+    <Text style={[styles.rowAmount, { color: isExpense ? C.red : isIncome ? C.green : C.mute }]} numberOfLines={1}>
       {isExpense ? '−' : isIncome ? '+' : ''}{money(t.amountCents)}
     </Text>
   </Pressable>;
 }
-function ActivityDay({ group, onEdit, accountName, categoryColor }) {
+function ActivityDay({ group, onEdit, accountName, categoryIcon }) {
   const label = parseDate(group.date)?.toLocaleDateString('en-AU', { weekday:'short', day:'numeric', month:'short', year:'numeric' }) || group.date;
   return <View style={styles.activityDay}>
     <View style={styles.dayHeader}>
@@ -362,7 +439,7 @@ function ActivityDay({ group, onEdit, accountName, categoryColor }) {
         <Text style={styles.dayIn}>In {money(group.income)}</Text>
       </View>
     </View>
-    {group.transactions.map(t => <TxRow key={t.id} t={t} color={categoryColor(t.category)}
+    {group.transactions.map(t => <TxRow key={t.id} t={t} icon={categoryIcon(t)}
       accountName={accountName(t.accountId)} destinationName={accountName(t.toAccountId)} onEdit={() => onEdit(t)}/>) }
   </View>;
 }
@@ -386,6 +463,9 @@ export default function App() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState('home');
+  const [settingsCategoryTab, setSettingsCategoryTab] = useState('expense');
+  const [plannedView, setPlannedView] = useState('all');
+  const [activeDay, setActiveDay] = useState(today());
   const [period, setPeriod] = useState('month');
   const [filter, setFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -437,7 +517,7 @@ export default function App() {
           setCloudStatus({ state: 'submitted', text: 'Saved to the iCloud container; Apple may still be syncing it.', at: date });
         } catch (e) {
           setCloudStatus({ state: 'error', text: e?.message || 'Could not back up to iCloud. Data remains saved on this device.', at: null });
-          return;
+          return; // Retry on the next change, app activation or periodic check.
         }
       }
     } finally { backupRunningRef.current = false; }
@@ -461,6 +541,8 @@ export default function App() {
           }
           if (!cancelled) setData(normalizeData(parsed));
         } else {
+          // Restore only on first install / with no local ledger: never overwrite
+          // existing local transactions automatically across multiple devices.
           try {
             const recovered = await recoverAutomaticBackup(readBackup);
             if (cancelled) return;
@@ -487,6 +569,7 @@ export default function App() {
     if (loading || !data) return;
     const snapshot = data;
     const json = JSON.stringify(snapshot);
+    // Serialize local writes to prevent a slow earlier write replacing a newer one.
     persistQueueRef.current = persistQueueRef.current.catch(() => {}).then(async () => {
       await AsyncStorage.setItem(STORAGE_KEY, json);
       if (dataRef.current === snapshot) scheduleCloudBackup();
@@ -511,12 +594,14 @@ export default function App() {
   useEffect(() => {
     const subscription = AppState.addEventListener('change', state => {
       if (state === 'active' && !loadingRef.current) {
+        setActiveDay(today());
         if (dataRef.current) scheduleCloudBackup(200);
         else retryCloudRecoveryWhenEmpty();
       }
     });
     const retry = setInterval(() => {
       if (AppState.currentState !== 'active') return;
+      setActiveDay(today());
       if (dataRef.current && cloudStatusRef.current.state === 'error') scheduleCloudBackup(200);
       if (!dataRef.current && cloudStatusRef.current.state === 'error') retryCloudRecoveryWhenEmpty();
     }, 5 * 60 * 1000);
@@ -531,7 +616,19 @@ export default function App() {
   const transactions = data?.transactions || [];
   const schedules = data?.schedules || [];
   const categories = data?.categories || defaultCategories();
+  const incomeCategories = data?.incomeCategories || defaultIncomeCategories();
   const categoryColor = name => categories.find(c => c.name === name)?.color || CATEGORY_COLORS[name] || C.blue;
+  const categoryIcon = t => t.type === 'transfer' ? CATEGORY_ICONS.Transfer :
+    (t.type === 'income' ? incomeCategories : categories).find(c => c.name === t.category)?.icon
+      || CATEGORY_ICONS[t.category] || (t.type === 'income' ? '💰' : '📦');
+  useEffect(() => {
+    if (loading || !data?.autoPostPlannedExpenses) return;
+    const firstDay = `${activeDay.slice(0,7)}-01`;
+    setData(previous => {
+      if (!previous?.autoPostPlannedExpenses) return previous;
+      return postPlannedMonth(previous, firstDay);
+    });
+  }, [loading, data, activeDay]);
   const balance = netWorth(accounts, transactions);
   const creditDebt = accounts.filter(a => a.kind === 'Credit Card').reduce((sum, a) => sum + Math.max(0, accountBalance(a, transactions)), 0);
   const range = period === 'year' ? [`${now.slice(0, 4)}-01-01`, now] : period === 'custom' ? appliedCustom : period === 'week' ? [weekStart(now), now] : [`${now.slice(0,7)}-01`, now];
@@ -543,7 +640,7 @@ export default function App() {
   const accountName = id => accounts.find(a => a.id === id)?.name || 'Deleted account';
   const searchResults = filteredTransactions(recentSort(transactions), { type: filter, query: searchQuery, start: searchStart, end: searchEnd, accountId: searchAccount, category: searchCategory, minAmount:searchMin, maxAmount:searchMax }, accounts);
   const activityGroups = groupActivity(searchResults);
-  const searchCategories = [...new Set([...categories.map(c=>c.name), ...INCOME_CATEGORIES, ...transactions.map(t=>t.category)])].filter(Boolean);
+  const searchCategories = [...new Set([...categories.map(c=>c.name), ...incomeCategories.map(c=>c.name), ...transactions.map(t=>t.category)])].filter(Boolean);
   const insightSeries = spendingSeries(transactions, ...range);
   const topTransaction = [...transactions].filter(t => t.type === 'expense' && t.date >= range[0] && t.date <= range[1]).sort((a,b)=>b.amountCents-a.amountCents)[0];
   const expenseChange = prevTotals.expenses ? Math.round((totals.expenses - prevTotals.expenses) / prevTotals.expenses * 100) : null;
@@ -565,9 +662,9 @@ export default function App() {
     setModal('account'); setEditingId(a?.id || null); setError('');
     setDraft(a ? { ...a, opening: (a.openingCents / 100).toFixed(2), creditLimit: ((a.creditLimitCents || 0) / 100).toFixed(2) } : { name: '', kind: 'Bank', opening: '0.00', creditLimit: '0.00', color: ACCOUNT_COLORS[accounts.length % ACCOUNT_COLORS.length] });
   }
-  function openCategory(c = null) {
+  function openCategory(c = null, kind = settingsCategoryTab) {
     setModal('category'); setEditingId(c?.name || null); setError('');
-    setDraft(c ? {...c} : { name: '', color: ACCOUNT_COLORS[categories.length % ACCOUNT_COLORS.length] });
+    setDraft(c ? {...c, categoryType:kind} : { name:'', categoryType:kind, icon:kind==='income'?'💰':'📦' });
   }
   function applyCustom() {
     if (!parseDate(insightStart) || !parseDate(insightEnd) || insightStart > insightEnd) return setInsightError('Enter valid start/end dates (YYYY-MM-DD), with start on or before end.');
@@ -578,7 +675,7 @@ export default function App() {
   }
   function openSchedule(s = null) {
     setModal('schedule'); setEditingId(s?.id || null); setError('');
-    setDraft(s ? { ...s, kind: s.kind || 'expense', amount: (s.amountCents / 100).toFixed(2) } : { kind: 'expense', name: '', amount: '', accountId: accounts[0]?.id, toAccountId: accounts.find(a => a.kind === 'Credit Card')?.id, category: 'Bills', startDate: now, repeat: 'Monthly' });
+    setDraft(s ? { ...s, kind: s.kind || 'expense', amount: (s.amountCents / 100).toFixed(2) } : { kind: plannedView === 'income' ? 'income' : 'expense', name: '', amount: '', accountId: accounts[0]?.id, toAccountId: accounts.find(a => a.kind === 'Credit Card')?.id, category: plannedView === 'income' ? incomeCategories[0]?.name || 'Other' : 'Bills', startDate: now, repeat: 'Monthly' });
   }
   function closeModal() { setModal(null); setError(''); }
   function saveTransaction() {
@@ -590,7 +687,7 @@ export default function App() {
     if (!['expense','income','transfer'].includes(draft.type)) return setError('Choose a transaction type.');
     if (draft.type === 'transfer' && (!accounts.some(a => a.id === draft.toAccountId) || draft.toAccountId === draft.accountId)) return setError('Choose a different destination account.');
     if (draft.type === 'expense' && !categories.some(c => c.name === draft.category)) return setError('Choose a spending category.');
-    if (draft.type === 'income' && !INCOME_CATEGORIES.includes(draft.category)) return setError('Choose an income category.');
+    if (draft.type === 'income' && !incomeCategories.some(c=>c.name === draft.category)) return setError('Choose an income category.');
     const tx = { id: editingId || uid(), type: draft.type, date: draft.date, time: parseTime(draft.time) || null,
       amountCents: cents, category: draft.type === 'transfer' ? 'Transfer' : draft.category,
       description: String(draft.description || '').trim() || (draft.type === 'transfer' ? 'Transfer' : draft.category),
@@ -626,6 +723,7 @@ export default function App() {
     const kind = draft.kind || 'expense';
     if (kind === 'card_payment' && (!accounts.some(a => a.id === draft.accountId && a.kind !== 'Credit Card') || !accounts.some(a => a.id === draft.toAccountId && a.kind === 'Credit Card'))) return setError('Choose a payment account and a credit card.');
     if (kind === 'expense' && !categories.some(c => c.name === draft.category)) return setError('Choose an expense category.');
+    if (kind === 'income' && !incomeCategories.some(c => c.name === draft.category)) return setError('Choose an income category.');
     const scheduledPayment = { id: editingId || uid(), kind, name: String(draft.name).trim(), amountCents: cents,
       category: kind === 'card_payment' ? 'Transfer' : draft.category, accountId: draft.accountId, toAccountId: kind === 'card_payment' ? draft.toAccountId : null, repeat: draft.repeat, startDate: draft.startDate,
       lastPaidThrough: editingId ? draft.lastPaidThrough : null, completed: editingId ? draft.completed : false };
@@ -634,27 +732,31 @@ export default function App() {
   }
   function saveCategory() {
     const name = String(draft.name || '').trim();
+    const kind = draft.categoryType === 'income' ? 'income' : 'expense';
+    const current = kind === 'income' ? incomeCategories : categories;
+    const key = kind === 'income' ? 'incomeCategories' : 'categories';
     if (!name) return setError('Enter a category name.');
     if (name.length > 30) return setError('Keep category names under 31 characters.');
     if (editingId === 'Other' && name !== 'Other') return setError('Other is the fallback category and cannot be renamed.');
-    if (categories.some(c => c.name.toLowerCase() === name.toLowerCase() && c.name !== editingId)) return setError('A category with this name already exists.');
-    if (INCOME_CATEGORIES.some(c => c.toLowerCase() === name.toLowerCase())) return setError('This name is reserved for income categories.');
-    const color = ACCOUNT_COLORS.includes(draft.color) || /^#[0-9a-f]{6}$/i.test(draft.color || '') ? draft.color : C.blue;
+    if (current.some(c => c.name.toLowerCase() === name.toLowerCase() && c.name !== editingId)) return setError('A category with this name already exists.');
+    if (!ICON_CHOICES.includes(draft.icon)) return setError('Choose a category icon.');
     update(d => ({ ...d,
-      categories: editingId ? d.categories.map(c => c.name === editingId ? { name, color } : c) : [...d.categories, { name, color }],
-      transactions: editingId && name !== editingId ? d.transactions.map(t => t.type === 'expense' && t.category === editingId ? { ...t, category: name } : t) : d.transactions,
-      schedules: editingId && name !== editingId ? d.schedules.map(t => (t.kind || 'expense') === 'expense' && t.category === editingId ? { ...t, category: name } : t) : d.schedules,
+      [key]: editingId ? d[key].map(c => c.name === editingId ? {...c,name,icon:draft.icon} : c)
+        : [...d[key], {name,icon:draft.icon,...(kind==='expense'?{color:CATEGORY_COLORS[name] || C.blue}:{})}],
+      transactions: editingId && name !== editingId ? d.transactions.map(t => t.type === kind && t.category === editingId ? {...t,category:name} : t) : d.transactions,
+      schedules: editingId && name !== editingId ? d.schedules.map(t => (t.kind || 'expense') === kind && t.category === editingId ? {...t,category:name} : t) : d.schedules,
     }));
     closeModal();
   }
-  function removeCategory(name) {
+  function removeCategory(name, kind = settingsCategoryTab) {
     if (name === 'Other') return Alert.alert('Required category', 'Other is kept as a fallback.');
-    Alert.alert('Delete category?', `Existing transactions and planned expenses in ${name} will be moved to Other.`, [
+    const key = kind === 'income' ? 'incomeCategories' : 'categories';
+    Alert.alert('Delete category?', `Existing ${kind} transactions and plans in ${name} will be moved to Other.`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Delete and reassign', style: 'destructive', onPress: () => update(d => ({ ...d,
-        categories: d.categories.filter(c=>c.name !== name),
-        transactions: d.transactions.map(t => t.type === 'expense' && t.category === name ? {...t, category:'Other'} : t),
-        schedules: d.schedules.map(s => (s.kind || 'expense') === 'expense' && s.category === name ? {...s,category:'Other'} : s),
+        [key]:d[key].filter(c=>c.name !== name),
+        transactions:d.transactions.map(t=>t.type === kind && t.category === name ? {...t,category:'Other'} : t),
+        schedules:d.schedules.map(t=>(t.kind || 'expense') === kind && t.category === name ? {...t,category:'Other'} : t),
       })) },
     ]);
   }
@@ -664,18 +766,30 @@ export default function App() {
       Alert.alert('Account in use', 'Delete or move its transactions and scheduled expenses first.'); return;
     }
     Alert.alert('Delete this item?', 'This cannot be undone.', [
-      { text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: () => { update(d => ({ ...d, [field]: d[field].filter(item => item.id !== id) })); if (modal === 'transaction') closeModal(); } },
+      { text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: () => { update(d => ({ ...d, [field]: d[field].filter(item => item.id !== id) })); if (modal === 'transaction' || modal === 'schedule') closeModal(); } },
     ]);
   }
   function recordPayment(s) {
-    Alert.alert('Record payment?', `${s.name}: ${money(s.amountCents)}. This will add ${s.kind === 'card_payment' ? 'an internal transfer (not an expense)' : 'an expense'} dated today and advance the schedule.`, [
+    Alert.alert('Record payment?', `${s.name}: ${money(s.amountCents)}. This will add ${s.kind === 'card_payment' ? 'an internal transfer (not an expense)' : s.kind === 'income' ? 'income' : 'an expense'} dated today and advance the schedule.`, [
       { text: 'Cancel', style: 'cancel' }, { text: 'Record', onPress: () => update(d => applyRecordedPayment(d, s, today())) },
+    ]);
+  }
+  function postThisMonth() {
+    const monthStart = `${today().slice(0,7)}-01`;
+    const pending = schedules.flatMap(s=>pendingOccurrencesInMonth(s,monthStart));
+    const remaining = pending.length;
+    if (!remaining) return Alert.alert('Nothing to post', 'All this month’s eligible planned expenses have already been recorded, or there are none.');
+    Alert.alert('Record planned expenses on the 1st?',
+      `${remaining} planned expense occurrence(s) will be recorded as spending dated ${monthStart}, even if their real due dates are later this month. This changes your monthly spending totals.`, [
+      {text:'Cancel',style:'cancel'},
+      {text:'Record expenses',onPress:()=>update(d=>postPlannedMonth(d,monthStart))},
     ]);
   }
   function resetAll() {
     Alert.alert('Clear all records?', 'This removes the accounts, transactions and planned payments from this device. The new empty ledger will also be saved to iCloud automatically; prior snapshots may remain in iCloud. This cannot be undone in the app.', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Clear records', style: 'destructive', onPress: () => {
+        // Never remove the storage key: that would trigger a cloud restore after restart.
         setData(empty()); setSavedError(''); setTab('home');
       } },
     ]);
@@ -707,7 +821,7 @@ export default function App() {
         <View style={styles.card}><SectionTitle side={<Text style={styles.smallLink} onPress={() => setTab('schedule')}>View planned ›</Text>}>Upcoming payments</SectionTitle>
           {!scheduled.length ? <EmptyMessage title="Nothing planned" detail="Add a recurring or one-off expense." /> : scheduled.slice(0,3).map(s => <View key={s.id} style={styles.miniRow}><View style={{ flex: 1 }}><Text style={styles.rowTitle}>{s.name}</Text><Text style={styles.rowSubtitle}>{s.due} · {s.repeat}</Text></View><Text style={styles.rowAmount}>{money(s.amountCents)}</Text></View>)}
         </View>
-        <View style={styles.card}><SectionTitle side={<Text style={styles.smallLink} onPress={() => setTab('transactions')}>All activity ›</Text>}>Recent transactions</SectionTitle>{!recent.length ? <EmptyMessage title="No transactions yet" detail="Record your first expense or income."/> : recent.slice(0,4).map(t => <TxRow key={t.id} t={t} color={categoryColor(t.category)} accountName={accountName(t.accountId)} destinationName={accountName(t.toAccountId)} onEdit={() => openTransaction(t)}/>)}</View>
+        <View style={styles.card}><SectionTitle side={<Text style={styles.smallLink} onPress={() => setTab('transactions')}>All activity ›</Text>}>Recent transactions</SectionTitle>{!recent.length ? <EmptyMessage title="No transactions yet" detail="Record your first expense or income."/> : recent.slice(0,4).map(t => <TxRow key={t.id} t={t} icon={categoryIcon(t)} accountName={accountName(t.accountId)} destinationName={accountName(t.toAccountId)} onEdit={() => openTransaction(t)}/>)}</View>
       </>}
       {tab === 'transactions' && <>
         <View style={styles.activityToolbar}>
@@ -734,16 +848,30 @@ export default function App() {
         </View> : null}
         <View style={styles.activityList}>
           {!searchResults.length ? <EmptyMessage title="No matching transactions" detail="Change the filters or add an entry." /> : activityGroups.map(group =>
-            <ActivityDay key={group.date} group={group} onEdit={openTransaction} accountName={accountName} categoryColor={categoryColor}/>) }
+            <ActivityDay key={group.date} group={group} onEdit={openTransaction} accountName={accountName} categoryIcon={categoryIcon}/>) }
         </View>
       </>}
       {tab === 'schedule' && <>
-        <View style={styles.toolbar}><Text style={[styles.subtle, { flex: 1 }]}>Planned payments are not counted as spending until recorded.</Text><Button title="+ Plan" small onPress={() => accounts.length ? openSchedule() : openAccount()}/></View>
+        <View style={styles.toolbar}><Text style={[styles.subtle, { flex: 1 }]}>Planned entries only affect your balances once recorded. Tap a plan to change it.</Text><Button title="+ Plan" small onPress={() => accounts.length ? openSchedule() : openAccount()}/></View>
+        <View style={styles.filterRow}>{[['all','All'],['expense','Expenses'],['income','Income'],['card_payment','Card repayments']].map(([k,label])=><Pill compact key={k} title={label} active={plannedView===k} onPress={()=>setPlannedView(k)}/>)}</View>
+        <View style={styles.card}>
+          <SectionTitle>Record expenses at month start</SectionTitle>
+          <Text style={styles.subtle}>Optional: post every eligible planned expense for this month as an actual transaction dated on the 1st. Weekly plans can generate multiple entries. Already-recorded occurrences are skipped. Income and credit card repayments are excluded.</Text>
+          <Pressable accessibilityRole="switch" accessibilityState={{checked:!!data.autoPostPlannedExpenses}}
+            onPress={()=>update(d=>({...d,autoPostPlannedExpenses:!d.autoPostPlannedExpenses}))} style={styles.between}>
+            <Text style={styles.rowTitle}>Automatically record on the 1st</Text>
+            <Text style={[styles.toggleBadge,{backgroundColor:data.autoPostPlannedExpenses?C.green:'#DCE1EB'}]}>{data.autoPostPlannedExpenses?'ON':'OFF'}</Text>
+          </Pressable>
+          <Text style={styles.helper}>When enabled, the app posts this month's remaining expense occurrences upon opening, even if opened after the 1st. It does not run while iOS has fully suspended the app.</Text>
+          <Button title="Record this month's expenses now" secondary small onPress={postThisMonth}/>
+        </View>
         <View style={styles.card}><SectionTitle>Upcoming and overdue</SectionTitle>
-          {!scheduled.length ? <EmptyMessage title="No planned payments" detail="Add rent, subscriptions or another bill." /> : scheduled.map(s => <View key={s.id} style={styles.scheduleRow}>
-            <View style={{ flex: 1 }}><Text style={styles.rowTitle}>{s.name}</Text><Text style={[styles.rowSubtitle, s.due < now && { color: C.red }]}>{s.due < now ? 'Overdue · ' : ''}{s.due} · {s.repeat} · {accountName(s.accountId)}{s.kind === 'card_payment' ? ` → ${accountName(s.toAccountId)} · Card repayment` : ''}</Text></View>
-            <View style={{ alignItems: 'flex-end', gap: 7 }}><Text style={styles.rowAmount}>{money(s.amountCents)}</Text><Button title="Record paid" small secondary onPress={() => recordPayment(s)}/><View style={{ flexDirection:'row', gap:12 }}><Text style={styles.inlineAction} onPress={() => openSchedule(s)}>Edit</Text><Text style={[styles.inlineAction, { color: C.red }]} onPress={() => confirmRemove('schedule', s.id)}>Delete</Text></View></View>
-          </View>)}
+          {!scheduled.filter(s=>plannedView==='all'||(s.kind||'expense')===plannedView).length ? <EmptyMessage title="No planned entries" detail="Add income, expenses or a card repayment plan." /> : scheduled.filter(s=>plannedView==='all'||(s.kind||'expense')===plannedView).map(s =>
+            <Pressable key={s.id} accessibilityRole="button" accessibilityLabel={`Edit planned ${s.name}`} onPress={()=>openSchedule(s)} style={styles.scheduleRow}>
+              <View style={styles.txIcon}><Text style={{fontSize:18}}>{categoryIcon({type:s.kind==='card_payment'?'transfer':s.kind||'expense',category:s.category})}</Text></View>
+              <View style={{flex:1,minWidth:0}}><Text style={styles.rowTitle} numberOfLines={1}>{s.name}</Text><Text style={[styles.rowSubtitle,s.due<now&&{color:C.red}]} numberOfLines={2}>{s.due < now ? 'Overdue · ' : ''}{s.due} · {s.repeat} · {accountName(s.accountId)}</Text></View>
+              <Text style={[styles.rowAmount,{color:s.kind==='income'?C.green:s.kind==='card_payment'?C.mute:C.red}]}>{s.kind==='income'?'+':s.kind==='card_payment'?'':'−'}{money(s.amountCents)}</Text>
+            </Pressable>)}
         </View>
       </>}
       {tab === 'analytics' && <>
@@ -790,30 +918,38 @@ export default function App() {
             </View></View>
           </View>;
         })}
+      </>}
+      {tab === 'settings' && <>
         <View style={styles.card}>
-          <SectionTitle side={<Button title="+ Category" small onPress={() => openCategory()}/>}>Spending categories</SectionTitle>
-          <Text style={styles.subtle}>Create, rename, recolour or delete categories. Changes are reflected in existing expense records and charts.</Text>
-          {categories.map(c => <View key={c.name} style={styles.miniRow}><View style={[styles.categoryDot, {backgroundColor:c.color}]}/><Text style={[styles.rowTitle,{flex:1}]}>{c.name}</Text>
-            <Text style={styles.inlineAction} onPress={() => openCategory(c)}>Edit</Text>
-            {c.name !== 'Other' ? <Text style={[styles.inlineAction,{color:C.red,marginLeft:14}]} onPress={()=>removeCategory(c.name)}>Delete</Text> : null}
-          </View>)}
+          <SectionTitle>Transaction categories</SectionTitle>
+          <Text style={styles.subtle}>Choose an icon for each category. Expense and income categories are managed separately.</Text>
+          <View style={styles.filterRow}>
+            <Pill title="Spending" active={settingsCategoryTab==='expense'} onPress={()=>setSettingsCategoryTab('expense')}/>
+            <Pill title="Income" active={settingsCategoryTab==='income'} onPress={()=>setSettingsCategoryTab('income')}/>
+          </View>
+          <Button title={settingsCategoryTab==='income'?'+ Income category':'+ Spending category'} secondary small onPress={()=>openCategory(null,settingsCategoryTab)}/>
+          {(settingsCategoryTab==='income'?incomeCategories:categories).map(c=><Pressable key={c.name} accessibilityRole="button" onPress={()=>openCategory(c,settingsCategoryTab)} style={styles.miniRow}>
+            <Text style={styles.categoryEmoji}>{c.icon || CATEGORY_ICONS[c.name] || '📦'}</Text>
+            <Text style={[styles.rowTitle,{flex:1}]}>{c.name}</Text>
+            <Text style={styles.smallLink}>Edit ›</Text>
+          </Pressable>)}
         </View>
         <View style={styles.card}><SectionTitle>Automatic iCloud backup</SectionTitle>
           <Text style={styles.summary}>{cloudStatus.text}</Text>
           {cloudStatus.at ? <Text style={styles.helper}>Last saved by the app: {new Date(cloudStatus.at).toLocaleString('en-AU')}</Text> : null}
-          <Text style={styles.helper}>Backups happen after changes while the app is running and are retried when it reopens. On a new installation, the newest valid snapshot is recovered if there is no local ledger. This is not live multi-device sync and iCloud upload timing is managed by Apple.</Text>
-          <Text style={styles.helper}>Privacy: snapshots contain readable JSON in your app’s private iCloud container. They are not separately password-encrypted. A signed build with the iCloud capability and iCloud Drive enabled is required; Expo Go cannot access this feature.</Text>
+          <Text style={styles.helper}>Backups occur while the app is running. On a new installation the latest valid snapshot is recovered if no local ledger exists. This is not live multi-device sync.</Text>
+          <Text style={styles.helper}>Backups are readable JSON inside the app’s private iCloud container and are not separately password-encrypted. A signed native iOS build is required.</Text>
         </View>
-        <View style={styles.card}><SectionTitle>Privacy and data</SectionTitle><Text style={styles.summary}>Financial records remain on this device and are automatically copied to your private app iCloud container when iCloud is available. No bank logins or app-operated servers are used.</Text><Button title="Clear all records" secondary onPress={resetAll}/></View>
+        <View style={styles.card}><SectionTitle>Privacy and data</SectionTitle><Text style={styles.summary}>Records stay on this device and are backed up automatically when iCloud is available. No bank credentials or external app server are used.</Text><Button title="Clear all records" secondary onPress={resetAll}/></View>
       </>}
     </ScrollView>
     <View style={styles.tabBar}>{NAV.map(([key, icon, label]) => <Pressable key={key} onPress={() => setTab(key)} style={styles.tabItem}><Text style={[styles.tabIcon, tab===key && {color:C.blue}]}>{icon}</Text><Text style={[styles.tabText, tab===key && {color:C.blue, fontWeight:'800'}]}>{label}</Text></Pressable>)}</View>
     <Modal visible={!!modal} animationType="slide" presentationStyle="pageSheet" onRequestClose={closeModal}>
       <SafeAreaView style={styles.modalScreen}><KeyboardAvoidingView style={{ flex:1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={styles.modalHeader}><Text style={styles.modalTitle}>{editingId ? 'Edit' : 'New'} {modal === 'transaction' ? 'transaction' : modal === 'account' ? 'account' : modal === 'category' ? 'spending category' : 'planned payment'}</Text><Text onPress={closeModal} style={styles.close}>Close</Text></View>
+        <View style={styles.modalHeader}><Text style={styles.modalTitle}>{editingId ? 'Edit' : 'New'} {modal === 'transaction' ? 'transaction' : modal === 'account' ? 'account' : modal === 'category' ? `${draft.categoryType==='income'?'income':'spending'} category` : 'planned payment'}</Text><Text onPress={closeModal} style={styles.close}>Close</Text></View>
         <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 55, gap: 20 }} keyboardShouldPersistTaps="handled">
           {modal === 'transaction' && <>
-            <View style={styles.filterRow}>{[['expense','Expense'],['income','Income'],['transfer','Transfer']].map(([k,l]) => <Pill key={k} title={l} active={draft.type===k} onPress={() => setDraft(x => ({...x, type:k, category:k==='income'?'Salary': k==='transfer'?'Transfer':categories[0]?.name || 'Other'}))}/>)}</View>
+            <View style={styles.filterRow}>{[['expense','Expense'],['income','Income'],['transfer','Transfer']].map(([k,l]) => <Pill key={k} title={l} active={draft.type===k} onPress={() => setDraft(x => ({...x, type:k, category:k==='income'?incomeCategories[0]?.name || 'Other': k==='transfer'?'Transfer':categories[0]?.name || 'Other'}))}/>)}</View>
             <LabeledInput label="Amount (AUD)" value={draft.amount} onChangeText={amount => setDraft(x=>({...x,amount}))} placeholder="0.00" keyboardType="decimal-pad" />
             <LabeledInput label="Description" value={draft.description} onChangeText={description => setDraft(x=>({...x,description}))} placeholder="e.g. Weekly groceries" />
             <LabeledInput label="Date (YYYY-MM-DD)" value={draft.date} onChangeText={date => setDraft(x=>({...x,date}))} placeholder="2026-11-04" />
@@ -821,7 +957,7 @@ export default function App() {
               placeholder="e.g. 14:35" hint={editingId && !draft.time ? 'This older entry has no recorded time. Leave blank if unknown, or enter the actual time.' : 'Defaults to the local time when you opened New transaction; you can change it.'}/>
 
             <Text style={styles.fieldLabel}>{draft.type === 'transfer' ? 'From account' : 'Account'}</Text><View style={styles.chips}>{accounts.map(a=><Pill key={a.id} title={a.name} active={draft.accountId===a.id} onPress={()=>setDraft(x=>({...x,accountId:a.id}))}/>)}</View>
-            {draft.type === 'transfer' ? <><Text style={styles.fieldLabel}>To account</Text><View style={styles.chips}>{accounts.filter(a=>a.id!==draft.accountId).map(a=><Pill key={a.id} title={a.name} active={draft.toAccountId===a.id} onPress={()=>setDraft(x=>({...x,toAccountId:a.id}))}/>)}</View><Text style={styles.helper}>Credit-card repayments should be transfers from your bank to the card, not expenses. Card purchases should be recorded as expenses on the card.</Text></> : <><Text style={styles.fieldLabel}>Category</Text><View style={styles.chips}>{(draft.type==='income'?INCOME_CATEGORIES:categories.map(c=>c.name)).map(c=><Pill key={c} title={c} active={draft.category===c} onPress={()=>setDraft(x=>({...x,category:c}))}/>)}</View></>}
+            {draft.type === 'transfer' ? <><Text style={styles.fieldLabel}>To account</Text><View style={styles.chips}>{accounts.filter(a=>a.id!==draft.accountId).map(a=><Pill key={a.id} title={a.name} active={draft.toAccountId===a.id} onPress={()=>setDraft(x=>({...x,toAccountId:a.id}))}/>)}</View><Text style={styles.helper}>Credit-card repayments should be transfers from your bank to the card, not expenses. Card purchases should be recorded as expenses on the card.</Text></> : <><Text style={styles.fieldLabel}>Category</Text><View style={styles.chips}>{(draft.type==='income'?incomeCategories.map(c=>c.name):categories.map(c=>c.name)).map(c=><Pill key={c} title={c} active={draft.category===c} onPress={()=>setDraft(x=>({...x,category:c}))}/>)}</View></>}
           </>}
           {modal === 'account' && <>
             <LabeledInput label="Account name" value={draft.name} onChangeText={name=>setDraft(x=>({...x,name}))} placeholder="e.g. Everyday" />
@@ -832,7 +968,11 @@ export default function App() {
           </>}
           {modal === 'schedule' && <>
             <Text style={styles.fieldLabel}>Planned payment type</Text>
-            <View style={styles.chips}><Pill title="Expense / card purchase" active={(draft.kind || 'expense')==='expense'} onPress={()=>setDraft(x=>({...x,kind:'expense'}))}/><Pill title="Credit card repayment" active={draft.kind==='card_payment'} onPress={()=>setDraft(x=>({...x,kind:'card_payment',accountId:accounts.find(a=>a.kind !== 'Credit Card')?.id, toAccountId:accounts.find(a=>a.kind === 'Credit Card')?.id}))}/></View>
+            <View style={styles.chips}>
+              <Pill title="Expense" active={(draft.kind || 'expense')==='expense'} onPress={()=>setDraft(x=>({...x,kind:'expense',category:categories[0]?.name||'Other'}))}/>
+              <Pill title="Income" active={draft.kind==='income'} onPress={()=>setDraft(x=>({...x,kind:'income',category:incomeCategories[0]?.name||'Other'}))}/>
+              <Pill title="Card repayment" active={draft.kind==='card_payment'} onPress={()=>setDraft(x=>({...x,kind:'card_payment',accountId:accounts.find(a=>a.kind !== 'Credit Card')?.id,toAccountId:accounts.find(a=>a.kind === 'Credit Card')?.id}))}/>
+            </View>
             <LabeledInput label="Name" value={draft.name} onChangeText={name=>setDraft(x=>({...x,name}))} placeholder="e.g. Rent" />
             <LabeledInput label="Amount (AUD)" value={draft.amount} onChangeText={amount=>setDraft(x=>({...x,amount}))} placeholder="0.00" keyboardType="decimal-pad" />
             <LabeledInput label="First due date (YYYY-MM-DD)" value={draft.startDate} onChangeText={startDate=>setDraft(x=>({...x,startDate}))}/>
@@ -841,14 +981,20 @@ export default function App() {
             {draft.kind === 'card_payment' ? <>
               <Text style={styles.fieldLabel}>Pay credit card</Text><View style={styles.chips}>{accounts.filter(a=>a.kind === 'Credit Card').map(a=><Pill key={a.id} title={a.name} active={draft.toAccountId===a.id} onPress={()=>setDraft(x=>({...x,toAccountId:a.id}))}/>)}</View>
               <Text style={styles.helper}>Recording this schedule creates an internal transfer and reduces card debt; it will not count as additional spending.</Text>
-            </> : <><Text style={styles.fieldLabel}>Category</Text><View style={styles.chips}>{categories.map(c=><Pill key={c.name} title={c.name} active={draft.category===c.name} onPress={()=>setDraft(x=>({...x,category:c.name}))}/>)}</View></>}
+            </> : <><Text style={styles.fieldLabel}>Category</Text><View style={styles.chips}>{(draft.kind==='income'?incomeCategories:categories).map(c=><Pill key={c.name} title={`${c.icon} ${c.name}`} active={draft.category===c.name} onPress={()=>setDraft(x=>({...x,category:c.name}))}/>)}</View></>}
           </>}
           {modal === 'category' && <>
             <LabeledInput label="Category name" value={draft.name} onChangeText={name=>setDraft(x=>({...x,name}))} placeholder="e.g. Pets"/>
-            <Text style={styles.fieldLabel}>Category colour</Text><View style={styles.chips}>{ACCOUNT_COLORS.map(color=><Pressable key={color} accessibilityRole="button" accessibilityLabel={`Colour ${color}`} onPress={()=>setDraft(x=>({...x,color}))} style={[styles.colorDot,{backgroundColor:color,borderWidth:draft.color===color?4:0,borderColor:'#D4DEED'}]}/>)}</View>
-            <Text style={styles.helper}>Renaming a category updates the category label on existing expenses and planned payments. Deleting reassigns them to Other.</Text>
+            <Text style={styles.fieldLabel}>Category icon</Text>
+            <View style={styles.iconPicker}>{ICON_CHOICES.map((icon,index)=><Pressable key={`${icon}-${index}`} accessibilityRole="button" accessibilityLabel={`Select icon ${icon}`} accessibilityState={{selected:draft.icon===icon}} onPress={()=>setDraft(x=>({...x,icon}))} style={[styles.iconChoice,draft.icon===icon&&styles.iconChoiceSelected]}><Text style={{fontSize:23}}>{icon}</Text></Pressable>)}</View>
+            <Text style={styles.helper}>Renaming updates existing {draft.categoryType==='income'?'income':'spending'} transactions and planned entries. Deleting reassigns them to Other.</Text>
+            {editingId && editingId !== 'Other' ? <Button title="Delete category" secondary onPress={()=>{const name=editingId;const kind=draft.categoryType;closeModal();removeCategory(name,kind);}}/> : null}
           </>}
           {modal === 'transaction' && editingId ? <Button title="Delete this transaction" secondary onPress={() => confirmRemove('transaction', editingId)}/> : null}
+          {modal === 'schedule' && editingId ? <>
+            <Button title={draft.kind==='income'?'Record this income':draft.kind==='card_payment'?'Record this repayment':'Record this expense'} secondary onPress={()=>{const schedule=scheduled.find(s=>s.id===editingId);if(schedule){closeModal();recordPayment(schedule)}else setError('No pending occurrence remains.');}}/>
+            <Button title="Delete this plan" secondary onPress={()=>confirmRemove('schedule',editingId)}/>
+          </> : null}
           {!!error && <Text style={styles.errorBanner}>{error}</Text>}
           <Button title={editingId ? 'Save changes' : modal==='transaction' ? 'Add transaction' : modal==='account' ? 'Add account' : modal==='category' ? 'Add category' : 'Add planned payment'} onPress={modal==='transaction'?saveTransaction:modal==='account'?saveAccount:modal==='category'?saveCategory:saveSchedule}/>
         </ScrollView>
@@ -881,16 +1027,16 @@ const styles = StyleSheet.create({
   dayHeader:{paddingTop:9,paddingBottom:7,borderBottomWidth:1,borderBottomColor:C.border,gap:3},
   dayHeaderDate:{fontSize:12,fontWeight:'800',color:C.ink},
   dayTotals:{flexDirection:'row',gap:12},dayOut:{fontSize:10,color:C.red,fontWeight:'700'},dayIn:{fontSize:10,color:C.green,fontWeight:'700'},
-  txIcon:{width:30,height:30,borderRadius:10,alignItems:'center',justifyContent:'center'},rowTitle:{color:C.ink,fontWeight:'700',fontSize:13},rowSubtitle:{color:C.mute,fontSize:10,marginTop:2},rowAmount:{color:C.ink,fontWeight:'800',fontSize:12},inlineAction:{fontSize:11,color:C.blue,fontWeight:'800'},
+  txIcon:{width:30,height:30,borderRadius:10,alignItems:'center',justifyContent:'center',backgroundColor:'#F1F4F9'},rowTitle:{color:C.ink,fontWeight:'700',fontSize:13},rowSubtitle:{color:C.mute,fontSize:10,marginTop:2},rowAmount:{color:C.ink,fontWeight:'800',fontSize:12},inlineAction:{fontSize:11,color:C.blue,fontWeight:'800'},
   empty:{paddingVertical:25,paddingHorizontal:12,alignItems:'center'},emptyTitle:{fontSize:15,color:C.ink,fontWeight:'800',marginBottom:5},
   toolbar:{flexDirection:'row',alignItems:'center',gap:12},filterRow:{flexDirection:'row',gap:7,flexWrap:'wrap'},
   pill:{borderWidth:1,borderColor:'#DFE4EF',borderRadius:22,paddingHorizontal:12,paddingVertical:9,backgroundColor:'#fff'},compactPill:{paddingHorizontal:11,paddingVertical:6},pillText:{fontSize:12,color:C.mute,fontWeight:'800'},
-  scheduleRow:{flexDirection:'row',gap:12,paddingVertical:16,borderBottomWidth:1,borderBottomColor:C.border},
+  scheduleRow:{flexDirection:'row',alignItems:'center',gap:9,paddingVertical:9,borderBottomWidth:1,borderBottomColor:C.border},
   lightDivider:{height:1,backgroundColor:C.border,marginVertical:10},track:{height:9,backgroundColor:'#EFF2F8',borderRadius:7,overflow:'hidden'},fill:{height:9,borderRadius:7},between:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',gap:9},
   summary:{color:'#56637E',fontSize:13,lineHeight:21},accountCard:{padding:18,borderRadius:18,backgroundColor:'#fff',borderWidth:1,borderColor:'#EFF1F6'},accountLogo:{width:43,height:43,borderRadius:14,justifyContent:'center',alignItems:'center'},accountMoney:{fontSize:17,color:C.ink,fontWeight:'800',maxWidth:'40%'},
   tabBar:{flexDirection:'row',backgroundColor:'#fff',borderTopWidth:1,borderTopColor:C.border,paddingVertical:10,paddingHorizontal:3},tabItem:{flex:1,alignItems:'center',justifyContent:'center',gap:4},tabIcon:{fontSize:23,fontWeight:'800',color:'#A1AAC0'},tabText:{fontSize:10,color:'#8B96AA',fontWeight:'600'},
   modalScreen:{flex:1,backgroundColor:C.pale},modalHeader:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',padding:20,backgroundColor:'#fff',borderBottomWidth:1,borderBottomColor:C.border},modalTitle:{color:C.ink,fontSize:20,fontWeight:'800'},close:{fontSize:14,color:C.blue,fontWeight:'800'},
   fieldLabel:{fontSize:13,fontWeight:'800',color:C.ink},input:{backgroundColor:'#fff',borderColor:'#DDE4EF',borderWidth:1,borderRadius:12,paddingHorizontal:14,paddingVertical:13,fontSize:16,color:C.ink},helper:{fontSize:11,color:C.mute,lineHeight:17},chips:{flexDirection:'row',flexWrap:'wrap',gap:7},colorDot:{width:35,height:35,borderRadius:18},
-  categoryDot:{width:21,height:21,borderRadius:7,marginRight:10},
+  categoryEmoji:{fontSize:22,width:36,marginRight:7,textAlign:'center'},iconPicker:{flexDirection:'row',flexWrap:'wrap',gap:8},iconChoice:{width:45,height:45,borderRadius:12,backgroundColor:'#F2F4FA',justifyContent:'center',alignItems:'center',borderWidth:1,borderColor:'#E2E6EF'},iconChoiceSelected:{borderColor:C.blue,borderWidth:2,backgroundColor:'#E4E9FE'},toggleBadge:{color:'#fff',fontSize:11,fontWeight:'800',paddingHorizontal:12,paddingVertical:7,borderRadius:9,overflow:'hidden'},
   errorBanner:{color:'#9A2D46',backgroundColor:'#FFE7ED',padding:12,borderRadius:9,fontSize:12},demoBanner:{backgroundColor:'#FFF5DF',borderRadius:12,padding:11},demoText:{color:'#9B6D25',fontSize:11,lineHeight:17},
 });
