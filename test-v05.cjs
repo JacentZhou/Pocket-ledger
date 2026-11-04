@@ -21,7 +21,7 @@ assert.equal(migrated.incomeCategories.find(c=>c.name==='Salary').icon,'💼');
 assert(migrated.incomeCategories.find(c=>c.name==='Side work'));
 assert.equal(migrated.autoPostPlannedExpenses,false);
 const roundtrip=f.readBackup(JSON.stringify(f.makeBackup({...migrated,autoPostPlannedExpenses:true})));
-assert.equal(roundtrip.autoPostPlannedExpenses,true);
+assert.equal(roundtrip.autoPostPlannedExpenses,false, 'v0.7 must discontinue first-of-month automatic posting');
 assert.equal(roundtrip.incomeCategories.find(c=>c.name==='Side work').icon,'💰');
 const monthly={id:'rent',kind:'expense',name:'Rent',category:'Housing',accountId:'bank',amountCents:42000,startDate:'2026-10-31',repeat:'Monthly',lastPaidThrough:'2026-10-31',completed:false};
 const weekly={id:'weekly',kind:'expense',name:'Groceries',category:'Groceries',accountId:'bank',amountCents:9000,startDate:'2026-10-28',repeat:'Weekly',lastPaidThrough:'2026-10-28',completed:false};
