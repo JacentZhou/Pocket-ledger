@@ -5,10 +5,26 @@ import {
   Text, TextInput, View,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { File, Paths } from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
+import * as DocumentPicker from 'expo-document-picker';
 
 // Pocket Ledger — personal finance MVP, offline/manual only.
 // Amounts are kept as integer cents to avoid floating-point currency errors.
-const STORAGE_KEY = 'pocket-ledger-v1';
+const STORAGE_KEY = 'pocket-ledger-v1'; // Keep this key to preserve v0.1/v0.2 data.
+const BACKUP_FORMAT = 'pocket-ledger-backup';
+const BACKUP_VERSION = 1;
+const MAX_BACKUP_BYTES = 10 * 1024 * 1024;
+const timeNow = () => {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+};
+function parseTime(value) {
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value || '')) return null;
+  return value;
+}
+// Never invent historical timestamps when upgrading earlier versions.
+// A null time means that no time was recorded in the original data.
 const NAV = [
   ['home', '⌂', 'Overview'], ['transactions', '↔', 'Activity'],
   ['schedule', '◷', 'Planned'], ['analytics', '▥', 'Insights'],
@@ -21,7 +37,25 @@ const CATEGORY_COLORS = {
   Housing: '#54AF9A', Bills: '#BC9B47', Health: '#54B4BC', Fun: '#9B76C9', Other: '#8692A6',
   Salary: '#42A883', Refund: '#72A8CC', Gift: '#AB8DD0', Interest: '#42A883',
 };
-const ACCOUNT_COLORS = ['#4D63E8', '#139C99', '#C07E52', '#8B66CB', '#314C73'];
+const ACCOUNT_COLORS = [
+  '#4D63E8', '#139C99', '#C07E52', '#8B66CB', '#314C73', '#E05E77',
+  '#F39C42', '#D3B34A', '#6FBA6F', '#4CBFAF', '#39A6C5', '#6482C6',
+  '#A67ED7', '#CE75BE', '#745F94', '#A47A65', '#485C66', '#E47555',
+  '#BB557A', '#2A8B75', '#7D929D', '#D2A24E', '#7056C8', '#E0779A',
+];
+const defaultCategories = () => EXPENSE_CATEGORIES.map(name => ({ name, color: CATEGORY_COLORS[name] || ACCOUNT_COLORS[0] }));
+function normalizeData(d) {
+  const existing = Array.isArray(d.categories) ? d.categories.filter(c => c && typeof c.name === 'string' && c.name.trim()).map(c => ({ name: c.name, color: c.color || CATEGORY_COLORS[c.name] || ACCOUNT_COLORS[0] })) : defaultCategories();
+  // Preserve user-defined legacy categories even if they have no palette entry.
+  for (const t of [...d.transactions, ...d.schedules]) {
+    if (t.type === 'income' || t.type === 'transfer' || t.kind === 'card_payment') continue;
+    if (t.category && !existing.some(c => c.name === t.category)) existing.push({ name: t.category, color: CATEGORY_COLORS[t.category] || ACCOUNT_COLORS[0] });
+  }
+  if (!existing.some(c => c.name === 'Other')) existing.push({ name: 'Other', color: CATEGORY_COLORS.Other });
+  return { ...d, categories: existing,
+    transactions: d.transactions.map(t => ({ ...t, time: parseTime(t.time) || null })),
+    accounts: d.accounts.map(a => ({ ...a, creditLimitCents: Number.isSafeInteger(a.creditLimitCents) ? a.creditLimitCents : 0 })) };
+}
 const REPEATS = ['None', 'Weekly', 'Fortnightly', 'Monthly', 'Yearly'];
 const money = (cents) => new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD' }).format(cents / 100);
 const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -48,16 +82,79 @@ function parseAmount(text) {
   return Number.isSafeInteger(result) && result > 0 ? result : null;
 }
 function accountBalance(account, transactions) {
+  // Bank/savings/cash: positive is an asset. Credit Card: positive is DEBT OWED.
+  const sign = account.kind === 'Credit Card' ? -1 : 1;
   let total = account.openingCents;
   for (const t of transactions) {
-    if (t.type === 'income' && t.accountId === account.id) total += t.amountCents;
-    if (t.type === 'expense' && t.accountId === account.id) total -= t.amountCents;
+    if (t.type === 'income' && t.accountId === account.id) total += sign * t.amountCents;
+    if (t.type === 'expense' && t.accountId === account.id) total -= sign * t.amountCents;
     if (t.type === 'transfer') {
-      if (t.accountId === account.id) total -= t.amountCents;
-      if (t.toAccountId === account.id) total += t.amountCents;
+      if (t.accountId === account.id) total -= sign * t.amountCents;
+      if (t.toAccountId === account.id) total += sign * t.amountCents;
     }
   }
   return total;
+}
+function netWorth(accounts, transactions) {
+  return accounts.reduce((sum, a) => sum + (a.kind === 'Credit Card' ? -1 : 1) * accountBalance(a, transactions), 0);
+}
+function previousRange(start, end) {
+  const days = Math.round((parseDate(end).getTime() - parseDate(start).getTime()) / 86400000) + 1;
+  return [shiftDays(start, -days), shiftDays(start, -1)];
+}
+function parseFilterAmount(value) {
+  const text = String(value || '').trim().replace(/[$,\s]/g,'');
+  if (!/^\d+(?:\.\d{1,2})?$/.test(text)) return null;
+  const n = Math.round(Number(text) * 100);
+  return Number.isSafeInteger(n) ? n : null;
+}
+function filteredTransactions(transactions, filters, accounts) {
+  const query = String(filters.query || '').trim().toLowerCase();
+  const start = parseDate(filters.start) ? filters.start : null;
+  const end = parseDate(filters.end) ? filters.end : null;
+  return transactions.filter(t => {
+    if (filters.type && filters.type !== 'all' && t.type !== filters.type) return false;
+    if (filters.accountId && filters.accountId !== 'all' && t.accountId !== filters.accountId && t.toAccountId !== filters.accountId) return false;
+    if (filters.category && filters.category !== 'all' && t.category !== filters.category) return false;
+    if (start && t.date < start) return false;
+    if (end && t.date > end) return false;
+    const min = filters.minAmount ? parseFilterAmount(filters.minAmount) : null;
+    const max = filters.maxAmount ? parseFilterAmount(filters.maxAmount) : null;
+    if (min !== null && t.amountCents < min) return false;
+    if (max !== null && t.amountCents > max) return false;
+    if (!query) return true;
+    const first = accounts.find(a => a.id === t.accountId)?.name || '';
+    const second = accounts.find(a => a.id === t.toAccountId)?.name || '';
+    const amount = (t.amountCents / 100).toFixed(2);
+    return [t.description, t.category, t.type, t.date, t.time, first, second, amount, money(t.amountCents)].some(x => String(x || '').toLowerCase().includes(query));
+  });
+}
+function spendingSeries(transactions, start, end) {
+  const days = Math.max(1, Math.round((parseDate(end).getTime() - parseDate(start).getTime()) / 86400000) + 1);
+  const result = [];
+  const push = (s, e, label) => result.push({ key: s, label, value: periodTotals(transactions, s, e).expenses, highlight: e >= today() });
+  if (days <= 14) {
+    for (let s = start; s <= end; s = shiftDays(s, 1)) push(s, s, parseDate(s).toLocaleDateString('en-AU', { day:'numeric', month:'short' }));
+  } else if (days <= 100) {
+    for (let s = start; s <= end; s = shiftDays(s, 7)) {
+      const e = shiftDays(s, 6) < end ? shiftDays(s, 6) : end;
+      push(s, e, parseDate(s).toLocaleDateString('en-AU', { day:'numeric', month:'short' }));
+    }
+  } else if (days <= 580) {
+    for (let s = start; s <= end;) {
+      const next = monthOffset(s.slice(0,7)+'-01', 1);
+      const e = shiftDays(next, -1) < end ? shiftDays(next, -1) : end;
+      push(s, e, parseDate(s).toLocaleDateString('en-AU', { month:'short', year: days > 370 ? '2-digit': undefined }));
+      s = shiftDays(e, 1);
+    }
+  } else {
+    // Group longer selected ranges into chronological calendar-year buckets.
+    for (let s = start; s <= end;) {
+      const e = `${s.slice(0,4)}-12-31` < end ? `${s.slice(0,4)}-12-31` : end;
+      push(s, e, s.slice(0,4)); s = shiftDays(e, 1);
+    }
+  }
+  return result;
 }
 function weekStart(value) {
   const d = parseDate(value); const weekday = (d.getDay() + 6) % 7;
@@ -105,12 +202,84 @@ function dueDate(schedule, now) {
   }
   return !schedule.lastPaidThrough || last > schedule.lastPaidThrough ? last : next;
 }
-const empty = () => ({ accounts: [], transactions: [], schedules: [], mode: 'personal' });
+function applyRecordedPayment(data, schedule, date) {
+  const isRepayment = schedule.kind === 'card_payment';
+  const tx = { id: uid(), date, time: timeNow(), type: isRepayment ? 'transfer' : 'expense',
+    amountCents: schedule.amountCents, category: isRepayment ? 'Transfer' : schedule.category,
+    description: schedule.name, accountId: schedule.accountId,
+    toAccountId: isRepayment ? schedule.toAccountId : null };
+  return {
+    ...data, transactions: [...data.transactions, tx],
+    schedules: data.schedules.map(s => s.id === schedule.id ? {
+      ...s, lastPaidThrough: schedule.due, completed: schedule.repeat === 'None',
+    } : s),
+  };
+}
+const recentSort = tx => [...tx].sort((a, b) =>
+  b.date.localeCompare(a.date) ||
+  (b.time || '').localeCompare(a.time || '') ||
+  String(b.id).localeCompare(String(a.id))
+);
+function groupActivity(transactions) {
+  const map = new Map();
+  for (const tx of recentSort(transactions)) {
+    if (!map.has(tx.date)) map.set(tx.date, { date: tx.date, transactions: [], income: 0, expenses: 0 });
+    const group = map.get(tx.date);
+    group.transactions.push(tx);
+    if (tx.type === 'income') group.income += tx.amountCents;
+    if (tx.type === 'expense') group.expenses += tx.amountCents;
+  }
+  return [...map.values()];
+}
+// A versioned, explicit export keeps data portable without any banking connection.
+function makeBackup(data, timestamp = new Date().toISOString()) {
+  return { format: BACKUP_FORMAT, version: BACKUP_VERSION, exportedAt: timestamp, payload: data };
+}
+function readBackup(raw) {
+  if (typeof raw !== 'string' || raw.length > MAX_BACKUP_BYTES) throw new Error('Backup file is too large or unreadable.');
+  let backup;
+  try { backup = JSON.parse(raw); } catch (_) { throw new Error('This file is not valid JSON.'); }
+  if (!backup || backup.format !== BACKUP_FORMAT || backup.version !== BACKUP_VERSION)
+    throw new Error('Unrecognised Pocket Ledger backup format or version.');
+  const d = backup.payload;
+  if (!d || !Array.isArray(d.accounts) || !Array.isArray(d.transactions) || !Array.isArray(d.schedules))
+    throw new Error('The backup is missing required financial data.');
+  if (d.accounts.length > 500 || d.transactions.length > 100000 || d.schedules.length > 5000)
+    throw new Error('The backup contains an unsupported number of records.');
+  const unique = entries => {
+    const seen = new Set();
+    return entries.every(x => {
+      if (!x || typeof x.id !== 'string' || !x.id || seen.has(x.id)) return false;
+      seen.add(x.id); return true;
+    });
+  };
+  if (!unique(d.accounts) || !unique(d.transactions) || !unique(d.schedules)) throw new Error('The backup contains invalid or duplicate record IDs.');
+  const ids = new Set(d.accounts.map(a => a.id));
+  if (!d.accounts.every(a => typeof a.name === 'string' && a.name.trim() && ['Bank','Savings','Cash','Credit Card'].includes(a.kind)
+    && Number.isSafeInteger(a.openingCents) && a.openingCents >= 0
+    && (!('creditLimitCents' in a) || (Number.isSafeInteger(a.creditLimitCents) && a.creditLimitCents >= 0))))
+    throw new Error('The backup contains an invalid account.');
+  if (!d.transactions.every(t => ['income','expense','transfer'].includes(t.type) && parseDate(t.date)
+    && (!t.time || parseTime(t.time)) && Number.isSafeInteger(t.amountCents) && t.amountCents > 0
+    && ids.has(t.accountId) && (t.type !== 'transfer' || (ids.has(t.toAccountId) && t.toAccountId !== t.accountId))
+    && typeof t.description === 'string' && typeof t.category === 'string'))
+    throw new Error('The backup contains an invalid transaction.');
+  if (!d.schedules.every(sc => typeof sc.name === 'string' && Number.isSafeInteger(sc.amountCents) && sc.amountCents > 0
+    && parseDate(sc.startDate) && REPEATS.includes(sc.repeat) && ids.has(sc.accountId)
+    && ((sc.kind || 'expense') !== 'card_payment' || ids.has(sc.toAccountId))))
+    throw new Error('The backup contains an invalid planned payment.');
+  if (d.categories !== undefined && (!Array.isArray(d.categories) || d.categories.length > 500
+    || !d.categories.every(c => c && typeof c.name === 'string' && typeof c.color === 'string')))
+    throw new Error('The backup contains invalid categories.');
+  return normalizeData(d);
+}
+const empty = () => ({ accounts: [], transactions: [], schedules: [], categories: defaultCategories(), mode: 'personal' });
 function demo() {
   const now = today();
   const checking = 'demo-everyday', savings = 'demo-savings';
   return {
     mode: 'demo',
+    categories: defaultCategories(),
     accounts: [
       { id: checking, name: 'Everyday', kind: 'Bank', openingCents: 460000, color: '#4D63E8' },
       { id: savings, name: 'Savings', kind: 'Savings', openingCents: 1450000, color: '#139C99' },
@@ -135,7 +304,7 @@ function demo() {
       ['expense', 80, 43000, 'Housing', 'Rent', checking],
       ['income', 80, 190000, 'Salary', 'Pay', checking],
     ].map(([type, ago, amountCents, category, description, accountId], index) => ({
-      id: `demo-tx-${index}`, type, date: shiftDays(now, -ago), amountCents,
+      id: `demo-tx-${index}`, type, date: shiftDays(now, -ago), time: `${String(8 + (index * 3) % 12).padStart(2,'0')}:${String(index * 11 % 60).padStart(2,'0')}`, amountCents,
       category, description, accountId, toAccountId: null,
     })),
     schedules: [
@@ -151,8 +320,8 @@ function Button({ title, onPress, secondary = false, small = false, disabled = f
     <Text style={[styles.buttonText, secondary && { color: C.blue }, small && { fontSize: 12 }]}>{title}</Text>
   </Pressable>;
 }
-function Pill({ title, active, onPress, color }) {
-  return <Pressable onPress={onPress} style={[styles.pill, active && { backgroundColor: color || C.blue, borderColor: color || C.blue }]}>
+function Pill({ title, active, onPress, color, compact = false }) {
+  return <Pressable onPress={onPress} style={[styles.pill, compact && styles.compactPill, active && { backgroundColor: color || C.blue, borderColor: color || C.blue }]}>
     <Text style={[styles.pillText, active && { color: '#fff' }]}>{title}</Text>
   </Pressable>;
 }
@@ -165,25 +334,51 @@ function Metric({ label, value, color }) {
 function EmptyMessage({ title, detail }) {
   return <View style={styles.empty}><Text style={{ fontSize: 28, marginBottom: 7 }}>◌</Text><Text style={styles.emptyTitle}>{title}</Text><Text style={styles.subtleCenter}>{detail}</Text></View>;
 }
-function TxRow({ t, accountName, onEdit, onRemove }) {
+function TxRow({ t, accountName, destinationName, onEdit, color }) {
   const isExpense = t.type === 'expense'; const isIncome = t.type === 'income';
   const symbol = isExpense ? '−' : isIncome ? '+' : '↔';
-  return <View style={styles.listRow}>
-    <View style={[styles.txIcon, { backgroundColor: `${CATEGORY_COLORS[t.category] || C.blue}20` }]}><Text style={{ color: CATEGORY_COLORS[t.category] || C.blue, fontWeight: '800', fontSize: 19 }}>{symbol}</Text></View>
-    <View style={{ flex: 1, minWidth: 0 }}><Text style={styles.rowTitle} numberOfLines={1}>{t.description || (t.type === 'transfer' ? 'Transfer' : t.category)}</Text><Text style={styles.rowSubtitle}>{t.date} · {t.type === 'transfer' ? 'Transfer' : t.category} · {accountName}</Text></View>
-    <View style={{ alignItems: 'flex-end', gap: 5 }}><Text style={[styles.rowAmount, { color: isExpense ? C.ink : isIncome ? C.green : C.mute }]}>{isExpense ? '−' : isIncome ? '+' : ''}{money(t.amountCents)}</Text>
-      <View style={{ flexDirection: 'row', gap: 12 }}><Text onPress={onEdit} style={styles.inlineAction}>Edit</Text><Text onPress={onRemove} style={[styles.inlineAction, { color: C.red }]}>Delete</Text></View>
+  const typeLabel = isExpense ? 'Expense' : isIncome ? 'Income' : 'Transfer';
+  const accountLabel = t.type === 'transfer' ? `${accountName} → ${destinationName || 'Unknown account'}` : accountName;
+  return <Pressable onPress={onEdit} accessibilityRole="button"
+    accessibilityLabel={`Edit ${typeLabel.toLowerCase()}, ${t.description}, ${money(t.amountCents)}, ${t.date}${t.time ? ` at ${t.time}` : ''}`}
+    style={styles.listRow}>
+    <View style={[styles.txIcon, { backgroundColor: `${color || CATEGORY_COLORS[t.category] || C.blue}20` }]}>
+      <Text style={{ color: color || CATEGORY_COLORS[t.category] || C.blue, fontWeight: '800', fontSize: 16 }}>{symbol}</Text>
     </View>
+    <View style={{ flex: 1, minWidth: 0 }}>
+      <Text style={styles.rowTitle} numberOfLines={1}>{t.description || typeLabel}</Text>
+      <Text style={styles.rowSubtitle} numberOfLines={1}>{typeLabel} · {accountLabel}</Text>
+    </View>
+    <Text style={[styles.rowAmount, { color: isExpense ? C.ink : isIncome ? C.green : C.mute }]} numberOfLines={1}>
+      {isExpense ? '−' : isIncome ? '+' : ''}{money(t.amountCents)}
+    </Text>
+  </Pressable>;
+}
+function ActivityDay({ group, onEdit, accountName, categoryColor }) {
+  const label = parseDate(group.date)?.toLocaleDateString('en-AU', { weekday:'short', day:'numeric', month:'short', year:'numeric' }) || group.date;
+  return <View style={styles.activityDay}>
+    <View style={styles.dayHeader}>
+      <Text style={styles.dayHeaderDate}>{label}</Text>
+      <View style={styles.dayTotals}>
+        <Text style={styles.dayOut}>Out {money(group.expenses)}</Text>
+        <Text style={styles.dayIn}>In {money(group.income)}</Text>
+      </View>
+    </View>
+    {group.transactions.map(t => <TxRow key={t.id} t={t} color={categoryColor(t.category)}
+      accountName={accountName(t.accountId)} destinationName={accountName(t.toAccountId)} onEdit={() => onEdit(t)}/>) }
   </View>;
 }
+
 function Chart({ series, accent = C.blue }) {
   const high = Math.max(1, ...series.map(x => x.value));
-  return <View style={styles.chart}><View style={styles.chartBars}>
-    {series.map((item) => <View key={item.key} style={styles.barItem}>
-      <View style={styles.barTrack}><View style={[styles.barFill, { height: `${item.value === 0 ? 0 : Math.max(2, item.value / high * 100)}%`, backgroundColor: item.highlight ? accent : '#C9D2F7' }]} /></View>
-      <Text style={styles.barLabel}>{item.label}</Text>
-    </View>)}
-  </View></View>;
+  return <ScrollView style={styles.chart} horizontal showsHorizontalScrollIndicator={series.length > 7} contentContainerStyle={{ flexGrow: 1 }}>
+    <View style={[styles.chartBars, { width: Math.max(290, series.length * 44) }]}>
+      {series.map((item) => <View key={item.key} style={styles.barItem}>
+        <View style={styles.barTrack}><View style={[styles.barFill, { height: `${item.value === 0 ? 0 : Math.max(2, item.value / high * 100)}%`, backgroundColor: item.highlight ? accent : '#C9D2F7' }]} /></View>
+        <Text style={styles.barLabel} numberOfLines={1}>{item.label}</Text>
+      </View>)}
+    </View>
+  </ScrollView>;
 }
 function LabeledInput({ label, value, onChangeText, hint, keyboardType, placeholder }) {
   return <View style={{ gap: 6 }}><Text style={styles.fieldLabel}>{label}</Text><TextInput style={styles.input} value={value} onChangeText={onChangeText} keyboardType={keyboardType || 'default'} placeholder={placeholder || ''} placeholderTextColor="#A6AEC1" autoCapitalize="sentences" />{hint ? <Text style={styles.helper}>{hint}</Text> : null}</View>;
@@ -195,16 +390,29 @@ export default function App() {
   const [tab, setTab] = useState('home');
   const [period, setPeriod] = useState('month');
   const [filter, setFilter] = useState('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchStart, setSearchStart] = useState('');
+  const [searchEnd, setSearchEnd] = useState('');
+  const [searchMin, setSearchMin] = useState('');
+  const [searchMax, setSearchMax] = useState('');
+  const [searchAccount, setSearchAccount] = useState('all');
+  const [searchCategory, setSearchCategory] = useState('all');
+  const [showAdvancedSearch, setShowAdvancedSearch] = useState(false);
+  const [insightStart, setInsightStart] = useState(`${today().slice(0,4)}-01-01`);
+  const [insightEnd, setInsightEnd] = useState(today());
+  const [appliedCustom, setAppliedCustom] = useState([`${today().slice(0,4)}-01-01`, today()]);
+  const [insightError, setInsightError] = useState('');
   const [modal, setModal] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [draft, setDraft] = useState({});
   const [error, setError] = useState('');
   const [savedError, setSavedError] = useState('');
+  const [backupBusy, setBackupBusy] = useState(false);
   useEffect(() => {
     (async () => {
       try { const stored = await AsyncStorage.getItem(STORAGE_KEY); if (stored) {
         const parsed = JSON.parse(stored);
-        if (parsed && Array.isArray(parsed.accounts) && Array.isArray(parsed.transactions) && Array.isArray(parsed.schedules)) setData(parsed);
+        if (parsed && Array.isArray(parsed.accounts) && Array.isArray(parsed.transactions) && Array.isArray(parsed.schedules)) setData(normalizeData(parsed));
       } } catch (e) { setSavedError('Saved data could not be read. No changes have been made.'); }
       finally { setLoading(false); }
     })();
@@ -218,46 +426,68 @@ export default function App() {
   const accounts = data?.accounts || [];
   const transactions = data?.transactions || [];
   const schedules = data?.schedules || [];
-  const balance = accounts.reduce((sum, a) => sum + accountBalance(a, transactions), 0);
-  const range = getPeriod(now, period);
+  const categories = data?.categories || defaultCategories();
+  const categoryColor = name => categories.find(c => c.name === name)?.color || CATEGORY_COLORS[name] || C.blue;
+  const balance = netWorth(accounts, transactions);
+  const creditDebt = accounts.filter(a => a.kind === 'Credit Card').reduce((sum, a) => sum + Math.max(0, accountBalance(a, transactions)), 0);
+  const range = period === 'year' ? [`${now.slice(0, 4)}-01-01`, now] : period === 'custom' ? appliedCustom : period === 'week' ? [weekStart(now), now] : [`${now.slice(0,7)}-01`, now];
+  const prevRange = previousRange(range[0], range[1]);
+  const prevTotals = periodTotals(transactions, ...prevRange);
   const totals = periodTotals(transactions, range[0], range[1]);
   const groups = categoryTotals(transactions, range[0], range[1]);
   const scheduled = schedules.map(s => ({ ...s, due: dueDate(s, now) })).filter(s => s.due).sort((a,b) => a.due.localeCompare(b.due));
   const accountName = id => accounts.find(a => a.id === id)?.name || 'Deleted account';
-  const recent = [...transactions].sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
+  const searchResults = filteredTransactions(recentSort(transactions), { type: filter, query: searchQuery, start: searchStart, end: searchEnd, accountId: searchAccount, category: searchCategory, minAmount:searchMin, maxAmount:searchMax }, accounts);
+  const activityGroups = groupActivity(searchResults);
+  const searchCategories = [...new Set([...categories.map(c=>c.name), ...INCOME_CATEGORIES, ...transactions.map(t=>t.category)])].filter(Boolean);
+  const insightSeries = spendingSeries(transactions, ...range);
+  const topTransaction = [...transactions].filter(t => t.type === 'expense' && t.date >= range[0] && t.date <= range[1]).sort((a,b)=>b.amountCents-a.amountCents)[0];
+  const expenseChange = prevTotals.expenses ? Math.round((totals.expenses - prevTotals.expenses) / prevTotals.expenses * 100) : null;
+  const recent = recentSort(transactions);
   const series = useMemo(() => Array.from({ length: 6 }, (_, i) => {
-    if (period === 'month') {
-      const marker = monthOffset(`${now.slice(0,7)}-01`, i - 5);
-      const [start, end] = getPeriod(marker, 'month');
-      return { key: marker, label: parseDate(marker).toLocaleDateString('en-AU', { month: 'short' }), value: periodTotals(transactions, start, end).expenses, highlight: i === 5 };
-    }
-    const marker = shiftDays(weekStart(now), (i - 5) * 7);
-    return { key: marker, label: parseDate(marker).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }), value: periodTotals(transactions, marker, shiftDays(marker, 6)).expenses, highlight: i === 5 };
-  }), [transactions, period, now]);
+    const marker = monthOffset(`${now.slice(0,7)}-01`, i - 5);
+    const [start, end] = getPeriod(marker, 'month');
+    return { key: marker, label: parseDate(marker).toLocaleDateString('en-AU', { month: 'short' }), value: periodTotals(transactions, start, end).expenses, highlight: i === 5 };
+  }), [transactions, now]);
 
-  function openTransaction(t = null) {
+  function openTransaction(t = null, preset = null) {
     setModal('transaction'); setEditingId(t?.id || null); setError('');
-    setDraft(t ? { ...t, amount: (t.amountCents / 100).toFixed(2) } : {
-      type: 'expense', date: now, accountId: accounts[0]?.id, toAccountId: accounts[1]?.id,
-      amount: '', category: 'Groceries', description: '',
+    setDraft(t ? { ...t, time: t.time || '', amount: (t.amountCents / 100).toFixed(2) } : {
+      type: 'expense', date: today(), time: timeNow(), accountId: accounts[0]?.id, toAccountId: accounts[1]?.id,
+      amount: '', category: categories[0]?.name || 'Other', description: '', ...preset,
     });
   }
   function openAccount(a = null) {
     setModal('account'); setEditingId(a?.id || null); setError('');
-    setDraft(a ? { ...a, opening: (a.openingCents / 100).toFixed(2) } : { name: '', kind: 'Bank', opening: '0.00', color: ACCOUNT_COLORS[accounts.length % ACCOUNT_COLORS.length] });
+    setDraft(a ? { ...a, opening: (a.openingCents / 100).toFixed(2), creditLimit: ((a.creditLimitCents || 0) / 100).toFixed(2) } : { name: '', kind: 'Bank', opening: '0.00', creditLimit: '0.00', color: ACCOUNT_COLORS[accounts.length % ACCOUNT_COLORS.length] });
+  }
+  function openCategory(c = null) {
+    setModal('category'); setEditingId(c?.name || null); setError('');
+    setDraft(c ? {...c} : { name: '', color: ACCOUNT_COLORS[categories.length % ACCOUNT_COLORS.length] });
+  }
+  function applyCustom() {
+    if (!parseDate(insightStart) || !parseDate(insightEnd) || insightStart > insightEnd) return setInsightError('Enter valid start/end dates (YYYY-MM-DD), with start on or before end.');
+    setAppliedCustom([insightStart, insightEnd]); setPeriod('custom'); setInsightError('');
+  }
+  function clearSearch() {
+    setFilter('all'); setSearchQuery(''); setSearchStart(''); setSearchEnd(''); setSearchMin(''); setSearchMax(''); setSearchAccount('all'); setSearchCategory('all');
   }
   function openSchedule(s = null) {
     setModal('schedule'); setEditingId(s?.id || null); setError('');
-    setDraft(s ? { ...s, amount: (s.amountCents / 100).toFixed(2) } : { name: '', amount: '', accountId: accounts[0]?.id, category: 'Bills', startDate: now, repeat: 'Monthly' });
+    setDraft(s ? { ...s, kind: s.kind || 'expense', amount: (s.amountCents / 100).toFixed(2) } : { kind: 'expense', name: '', amount: '', accountId: accounts[0]?.id, toAccountId: accounts.find(a => a.kind === 'Credit Card')?.id, category: 'Bills', startDate: now, repeat: 'Monthly' });
   }
   function closeModal() { setModal(null); setError(''); }
   function saveTransaction() {
     const cents = parseAmount(draft.amount || '');
     if (!cents) return setError('Enter a positive amount, with up to two decimal places.');
     if (!parseDate(draft.date)) return setError('Use a valid date, e.g. 2026-11-04.');
+    if (!parseTime(draft.time) && !(editingId && !draft.time)) return setError('Enter the time in 24-hour format HH:mm (e.g. 14:35).');
     if (!accounts.some(a => a.id === draft.accountId)) return setError('Choose an account.');
-    if (draft.type === 'transfer' && (!draft.toAccountId || draft.toAccountId === draft.accountId)) return setError('Choose a different destination account.');
-    const tx = { id: editingId || uid(), type: draft.type, date: draft.date,
+    if (!['expense','income','transfer'].includes(draft.type)) return setError('Choose a transaction type.');
+    if (draft.type === 'transfer' && (!accounts.some(a => a.id === draft.toAccountId) || draft.toAccountId === draft.accountId)) return setError('Choose a different destination account.');
+    if (draft.type === 'expense' && !categories.some(c => c.name === draft.category)) return setError('Choose a spending category.');
+    if (draft.type === 'income' && !INCOME_CATEGORIES.includes(draft.category)) return setError('Choose an income category.');
+    const tx = { id: editingId || uid(), type: draft.type, date: draft.date, time: parseTime(draft.time) || null,
       amountCents: cents, category: draft.type === 'transfer' ? 'Transfer' : draft.category,
       description: String(draft.description || '').trim() || (draft.type === 'transfer' ? 'Transfer' : draft.category),
       accountId: draft.accountId, toAccountId: draft.type === 'transfer' ? draft.toAccountId : null };
@@ -271,7 +501,15 @@ export default function App() {
     if (!/^\d+(?:\.\d{1,2})?$/.test(raw)) return setError('Use a valid opening balance.');
     const cents = Math.round(Number(raw) * 100);
     if (!Number.isSafeInteger(cents)) return setError('Balance is too large.');
-    const account = { id: editingId || uid(), name, kind: draft.kind, openingCents: cents, color: draft.color };
+    if (editingId) {
+      const original = accounts.find(a => a.id === editingId);
+      if (original && (original.kind === 'Credit Card') !== (draft.kind === 'Credit Card') && (transactions.some(t => t.accountId === editingId || t.toAccountId === editingId) || schedules.some(t => t.accountId === editingId || t.toAccountId === editingId))) return setError('Cannot change this account between credit card and asset after transactions exist. Create a new account instead.');
+    }
+    const rawLimit = String(draft.creditLimit || '0').trim().replace(/[$,\s]/g, '');
+    if (draft.kind === 'Credit Card' && !/^\d+(?:\.\d{1,2})?$/.test(rawLimit)) return setError('Use a valid credit limit.');
+    const creditLimitCents = draft.kind === 'Credit Card' ? Math.round(Number(rawLimit) * 100) : 0;
+    if (!Number.isSafeInteger(creditLimitCents)) return setError('Credit limit is too large.');
+    const account = { id: editingId || uid(), name, kind: draft.kind, openingCents: cents, creditLimitCents, color: draft.color };
     update(d => ({ ...d, accounts: editingId ? d.accounts.map(a => a.id === editingId ? account : a) : [...d.accounts, account] }));
     closeModal();
   }
@@ -281,29 +519,93 @@ export default function App() {
     if (!cents) return setError('Enter a positive amount.');
     if (!parseDate(draft.startDate)) return setError('Use a valid due date, e.g. 2026-11-04.');
     if (!accounts.some(a => a.id === draft.accountId)) return setError('Choose an account.');
-    const scheduledPayment = { id: editingId || uid(), name: String(draft.name).trim(), amountCents: cents,
-      category: draft.category, accountId: draft.accountId, repeat: draft.repeat, startDate: draft.startDate,
+    const kind = draft.kind || 'expense';
+    if (kind === 'card_payment' && (!accounts.some(a => a.id === draft.accountId && a.kind !== 'Credit Card') || !accounts.some(a => a.id === draft.toAccountId && a.kind === 'Credit Card'))) return setError('Choose a payment account and a credit card.');
+    if (kind === 'expense' && !categories.some(c => c.name === draft.category)) return setError('Choose an expense category.');
+    const scheduledPayment = { id: editingId || uid(), kind, name: String(draft.name).trim(), amountCents: cents,
+      category: kind === 'card_payment' ? 'Transfer' : draft.category, accountId: draft.accountId, toAccountId: kind === 'card_payment' ? draft.toAccountId : null, repeat: draft.repeat, startDate: draft.startDate,
       lastPaidThrough: editingId ? draft.lastPaidThrough : null, completed: editingId ? draft.completed : false };
     update(d => ({ ...d, schedules: editingId ? d.schedules.map(s => s.id === editingId ? scheduledPayment : s) : [...d.schedules, scheduledPayment] }));
     closeModal();
   }
+  function saveCategory() {
+    const name = String(draft.name || '').trim();
+    if (!name) return setError('Enter a category name.');
+    if (name.length > 30) return setError('Keep category names under 31 characters.');
+    if (editingId === 'Other' && name !== 'Other') return setError('Other is the fallback category and cannot be renamed.');
+    if (categories.some(c => c.name.toLowerCase() === name.toLowerCase() && c.name !== editingId)) return setError('A category with this name already exists.');
+    if (INCOME_CATEGORIES.some(c => c.toLowerCase() === name.toLowerCase())) return setError('This name is reserved for income categories.');
+    const color = ACCOUNT_COLORS.includes(draft.color) || /^#[0-9a-f]{6}$/i.test(draft.color || '') ? draft.color : C.blue;
+    update(d => ({ ...d,
+      categories: editingId ? d.categories.map(c => c.name === editingId ? { name, color } : c) : [...d.categories, { name, color }],
+      transactions: editingId && name !== editingId ? d.transactions.map(t => t.type === 'expense' && t.category === editingId ? { ...t, category: name } : t) : d.transactions,
+      schedules: editingId && name !== editingId ? d.schedules.map(t => (t.kind || 'expense') === 'expense' && t.category === editingId ? { ...t, category: name } : t) : d.schedules,
+    }));
+    closeModal();
+  }
+  function removeCategory(name) {
+    if (name === 'Other') return Alert.alert('Required category', 'Other is kept as a fallback.');
+    Alert.alert('Delete category?', `Existing transactions and planned expenses in ${name} will be moved to Other.`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete and reassign', style: 'destructive', onPress: () => update(d => ({ ...d,
+        categories: d.categories.filter(c=>c.name !== name),
+        transactions: d.transactions.map(t => t.type === 'expense' && t.category === name ? {...t, category:'Other'} : t),
+        schedules: d.schedules.map(s => (s.kind || 'expense') === 'expense' && s.category === name ? {...s,category:'Other'} : s),
+      })) },
+    ]);
+  }
   function confirmRemove(type, id) {
     const field = type === 'transaction' ? 'transactions' : type === 'account' ? 'accounts' : 'schedules';
-    if (type === 'account' && (transactions.some(t => t.accountId === id || t.toAccountId === id) || schedules.some(s => s.accountId === id))) {
+    if (type === 'account' && (transactions.some(t => t.accountId === id || t.toAccountId === id) || schedules.some(s => s.accountId === id || s.toAccountId === id))) {
       Alert.alert('Account in use', 'Delete or move its transactions and scheduled expenses first.'); return;
     }
     Alert.alert('Delete this item?', 'This cannot be undone.', [
-      { text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: () => update(d => ({ ...d, [field]: d[field].filter(item => item.id !== id) })) },
+      { text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: () => { update(d => ({ ...d, [field]: d[field].filter(item => item.id !== id) })); if (modal === 'transaction') closeModal(); } },
     ]);
   }
   function recordPayment(s) {
-    Alert.alert('Record payment?', `${s.name}: ${money(s.amountCents)}. This will add an expense dated today and advance the schedule.`, [
-      { text: 'Cancel', style: 'cancel' }, { text: 'Record', onPress: () => update(d => ({ ...d,
-        transactions: [...d.transactions, { id: uid(), date: today(), type: 'expense', amountCents: s.amountCents,
-          category: s.category, description: s.name, accountId: s.accountId, toAccountId: null }],
-        schedules: d.schedules.map(x => x.id === s.id ? { ...x, lastPaidThrough: s.due, completed: s.repeat === 'None' } : x),
-      })) },
+    Alert.alert('Record payment?', `${s.name}: ${money(s.amountCents)}. This will add ${s.kind === 'card_payment' ? 'an internal transfer (not an expense)' : 'an expense'} dated today and advance the schedule.`, [
+      { text: 'Cancel', style: 'cancel' }, { text: 'Record', onPress: () => update(d => applyRecordedPayment(d, s, today())) },
     ]);
+  }
+  async function exportBackup() {
+    if (!data || backupBusy) return;
+    if (Platform.OS === 'web') return Alert.alert('Use an iPhone or iPad', 'iCloud Drive export uses the iOS share sheet.');
+    setBackupBusy(true);
+    try {
+      if (!(await Sharing.isAvailableAsync())) throw new Error('The system share sheet is unavailable on this device.');
+      const file = new File(Paths.cache, `pocket-ledger-${today()}-${Date.now()}.json`);
+      file.create({ overwrite: true });
+      await file.write(JSON.stringify(makeBackup(data), null, 2));
+      await Sharing.shareAsync(file.uri, { mimeType: 'application/json', UTI: 'public.json' });
+      // Share sheet closing does not prove the user saved it anywhere.
+      Alert.alert('Check your backup', 'If you selected Save to Files → iCloud Drive, open Files and confirm the backup is there. Export is manual, not automatic syncing.');
+    } catch (err) {
+      Alert.alert('Could not export backup', err?.message || 'Please try again.');
+    } finally { setBackupBusy(false); }
+  }
+  async function importBackup() {
+    if (backupBusy) return;
+    setBackupBusy(true);
+    try {
+      const result = await DocumentPicker.getDocumentAsync({ type: ['application/json', 'text/plain', '*/*'], copyToCacheDirectory: true });
+      if (result.canceled || !result.assets?.length) return;
+      const asset = result.assets[0];
+      if (asset.size && asset.size > MAX_BACKUP_BYTES) throw new Error('The backup is larger than the supported 10 MB limit.');
+      const file = new File(asset.uri);
+      const restored = readBackup(await file.text());
+      Alert.alert('Replace current data?', `Restore ${restored.accounts.length} accounts, ${restored.transactions.length} transactions and ${restored.schedules.length} planned payments? This REPLACES all data currently on this device. Export a backup first if you want to keep it.`, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Replace and restore', style: 'destructive', onPress: async () => {
+          try {
+            await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(restored));
+            setSavedError(''); setData(restored); setTab('home');
+            Alert.alert('Backup restored', 'Your accounts and transactions have been restored on this device.');
+          } catch (e) { Alert.alert('Restore failed', 'Could not save the imported data. Your current data has not been replaced.'); }
+        } },
+      ]);
+    } catch (err) { Alert.alert('Could not restore backup', err?.message || 'Please select a valid Pocket Ledger backup.'); }
+    finally { setBackupBusy(false); }
   }
   function resetAll() {
     Alert.alert('Erase all data?', 'All accounts, transactions and planned payments stored in this app will be deleted. This cannot be undone.', [
@@ -318,16 +620,17 @@ export default function App() {
     {savedError ? <Text style={{ color: C.red, marginBottom: 12 }}>{savedError}</Text> : null}
     <Button title="Start with empty accounts" onPress={() => setData(empty())} />
     <View style={{ height: 12 }}/><Button title="Explore with fictional demo data" secondary onPress={() => setData(demo())} />
+    <View style={{ height: 12 }}/><Button title="Restore from Files / iCloud Drive" secondary onPress={importBackup} disabled={backupBusy} />
     <Text style={[styles.helper, { textAlign: 'center', marginTop: 26 }]}>Offline only · No bank login · AUD</Text>
   </View></SafeAreaView>;
 
   return <SafeAreaView style={styles.screen}><StatusBar barStyle="dark-content"/>
-    <ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
+    <ScrollView contentContainerStyle={[styles.page, tab === 'transactions' && styles.activityPage]} keyboardShouldPersistTaps="handled">
       <View style={styles.header}><View><Text style={styles.eyebrow}>POCKET LEDGER {data.mode === 'demo' ? '· DEMO' : ''}</Text><Text style={styles.pageTitle}>{NAV.find(n => n[0] === tab)?.[2]}</Text></View><View style={styles.avatar}><Text style={{ fontSize: 23, color: C.blue }}>◈</Text></View></View>
       {savedError ? <Text style={styles.errorBanner}>{savedError}</Text> : null}
       {data.mode === 'demo' ? <View style={styles.demoBanner}><Text style={styles.demoText}>Fictional demo data. Erase it in Accounts before tracking your own finances.</Text></View> : null}
       {tab === 'home' && <>
-        <View style={styles.hero}><Text style={styles.heroSmall}>TOTAL ACROSS ACCOUNTS</Text><Text style={styles.heroBig} adjustsFontSizeToFit numberOfLines={1}>{money(balance)}</Text><Text style={styles.heroHint}>{accounts.length} {accounts.length === 1 ? 'account' : 'accounts'} · calculated from opening balances and transactions</Text>
+        <View style={styles.hero}><Text style={styles.heroSmall}>NET WORTH (ASSETS LESS CARD DEBT)</Text><Text style={styles.heroBig} adjustsFontSizeToFit numberOfLines={1}>{money(balance)}</Text><Text style={styles.heroHint}>{accounts.length} {accounts.length === 1 ? 'account' : 'accounts'} · credit card debt: {money(creditDebt)}</Text>
           <View style={styles.heroDivider}/><View style={styles.metricsRow}><Metric label="This month in" value={money(periodTotals(transactions, ...getPeriod(now, 'month')).income)} color="#9AE6C6"/><Metric label="This month out" value={money(periodTotals(transactions, ...getPeriod(now, 'month')).expenses)} color="#FFBAC8"/></View>
         </View>
         <View style={styles.quickRow}><Button title="+ Add transaction" onPress={() => accounts.length ? openTransaction() : openAccount()} /><Button title="+ Add account" secondary onPress={() => openAccount()}/></View>
@@ -335,66 +638,150 @@ export default function App() {
         <View style={styles.card}><SectionTitle side={<Text style={styles.smallLink} onPress={() => setTab('schedule')}>View planned ›</Text>}>Upcoming payments</SectionTitle>
           {!scheduled.length ? <EmptyMessage title="Nothing planned" detail="Add a recurring or one-off expense." /> : scheduled.slice(0,3).map(s => <View key={s.id} style={styles.miniRow}><View style={{ flex: 1 }}><Text style={styles.rowTitle}>{s.name}</Text><Text style={styles.rowSubtitle}>{s.due} · {s.repeat}</Text></View><Text style={styles.rowAmount}>{money(s.amountCents)}</Text></View>)}
         </View>
-        <View style={styles.card}><SectionTitle side={<Text style={styles.smallLink} onPress={() => setTab('transactions')}>All activity ›</Text>}>Recent transactions</SectionTitle>{!recent.length ? <EmptyMessage title="No transactions yet" detail="Record your first expense or income."/> : recent.slice(0,4).map(t => <TxRow key={t.id} t={t} accountName={accountName(t.accountId)} onEdit={() => openTransaction(t)} onRemove={() => confirmRemove('transaction', t.id)}/>)}</View>
+        <View style={styles.card}><SectionTitle side={<Text style={styles.smallLink} onPress={() => setTab('transactions')}>All activity ›</Text>}>Recent transactions</SectionTitle>{!recent.length ? <EmptyMessage title="No transactions yet" detail="Record your first expense or income."/> : recent.slice(0,4).map(t => <TxRow key={t.id} t={t} color={categoryColor(t.category)} accountName={accountName(t.accountId)} destinationName={accountName(t.toAccountId)} onEdit={() => openTransaction(t)}/>)}</View>
       </>}
       {tab === 'transactions' && <>
-        <View style={styles.toolbar}><View style={{ flex: 1 }}><Text style={styles.subtle}>Manual income, expenses and internal transfers.</Text></View><Button title="+ New" small onPress={() => accounts.length ? openTransaction() : openAccount()}/></View>
-        <View style={styles.filterRow}>{[['all','All'],['expense','Spending'],['income','Income'],['transfer','Transfers']].map(([k,l]) => <Pill key={k} title={l} active={filter === k} onPress={() => setFilter(k)}/>)}</View>
-        <View style={styles.card}>{!recent.filter(t => filter === 'all' || t.type === filter).length ? <EmptyMessage title="No matching transactions" detail="Tap + New to record one." /> : recent.filter(t => filter === 'all' || t.type === filter).map(t => <TxRow key={t.id} t={t} accountName={accountName(t.accountId)} onEdit={() => openTransaction(t)} onRemove={() => confirmRemove('transaction', t.id)}/>)}</View>
+        <View style={styles.activityToolbar}>
+          <TextInput value={searchQuery} onChangeText={setSearchQuery} style={styles.searchInput}
+            placeholder="Search description, account, date, amount..." placeholderTextColor="#9FA9BA"
+            accessibilityLabel="Search all transactions" autoCapitalize="none" />
+          <Button title="+ New" small onPress={() => accounts.length ? openTransaction() : openAccount()}/>
+        </View>
+        <View style={styles.filterRow}>{[['all','All'],['expense','Spending'],['income','Income'],['transfer','Transfers']].map(([k,l]) => <Pill compact key={k} title={l} active={filter === k} onPress={() => setFilter(k)}/>)}</View>
+        <View style={styles.activityMeta}>
+          <Text style={styles.activityCount}>{searchResults.length} of {transactions.length} transactions · tap to edit</Text>
+          <Text style={styles.smallLink} onPress={() => setShowAdvancedSearch(x=>!x)}>{showAdvancedSearch ? 'Less filters' : 'More filters'}</Text>
+          <Text style={styles.smallLink} onPress={clearSearch}>Clear</Text>
+        </View>
+        {showAdvancedSearch ? <View style={styles.card}>
+          <LabeledInput label="From (YYYY-MM-DD)" value={searchStart} onChangeText={setSearchStart} placeholder="Optional start date"/>
+          <LabeledInput label="To (YYYY-MM-DD)" value={searchEnd} onChangeText={setSearchEnd} placeholder="Optional end date"/>
+          {(searchStart && !parseDate(searchStart) || searchEnd && !parseDate(searchEnd) || searchStart && searchEnd && parseDate(searchStart) && parseDate(searchEnd) && searchStart > searchEnd) ? <Text style={styles.errorBanner}>Enter valid dates with start no later than end. Invalid date fields are not applied.</Text> : null}
+          <LabeledInput label="Minimum amount (AUD)" value={searchMin} onChangeText={setSearchMin} keyboardType="decimal-pad" placeholder="Optional minimum"/>
+          <LabeledInput label="Maximum amount (AUD)" value={searchMax} onChangeText={setSearchMax} keyboardType="decimal-pad" placeholder="Optional maximum"/>
+          {((searchMin && parseFilterAmount(searchMin) === null) || (searchMax && parseFilterAmount(searchMax) === null) || (searchMin && searchMax && parseFilterAmount(searchMin) !== null && parseFilterAmount(searchMax) !== null && parseFilterAmount(searchMin) > parseFilterAmount(searchMax))) ? <Text style={styles.errorBanner}>Enter valid amounts with minimum no greater than maximum. Invalid amounts are not applied.</Text> : null}
+          <Text style={styles.fieldLabel}>Account (including transfers)</Text><View style={styles.chips}><Pill title="All accounts" active={searchAccount==='all'} onPress={()=>setSearchAccount('all')}/>{accounts.map(a=><Pill key={a.id} title={a.name} active={searchAccount===a.id} onPress={()=>setSearchAccount(a.id)}/>)}</View>
+          <Text style={styles.fieldLabel}>Category</Text><View style={styles.chips}><Pill title="All categories" active={searchCategory==='all'} onPress={()=>setSearchCategory('all')}/>{searchCategories.map(c=><Pill key={c} title={c} active={searchCategory===c} onPress={()=>setSearchCategory(c)}/>)}</View>
+        </View> : null}
+        <View style={styles.activityList}>
+          {!searchResults.length ? <EmptyMessage title="No matching transactions" detail="Change the filters or add an entry." /> : activityGroups.map(group =>
+            <ActivityDay key={group.date} group={group} onEdit={openTransaction} accountName={accountName} categoryColor={categoryColor}/>) }
+        </View>
       </>}
       {tab === 'schedule' && <>
         <View style={styles.toolbar}><Text style={[styles.subtle, { flex: 1 }]}>Planned payments are not counted as spending until recorded.</Text><Button title="+ Plan" small onPress={() => accounts.length ? openSchedule() : openAccount()}/></View>
         <View style={styles.card}><SectionTitle>Upcoming and overdue</SectionTitle>
           {!scheduled.length ? <EmptyMessage title="No planned payments" detail="Add rent, subscriptions or another bill." /> : scheduled.map(s => <View key={s.id} style={styles.scheduleRow}>
-            <View style={{ flex: 1 }}><Text style={styles.rowTitle}>{s.name}</Text><Text style={[styles.rowSubtitle, s.due < now && { color: C.red }]}>{s.due < now ? 'Overdue · ' : ''}{s.due} · {s.repeat} · {accountName(s.accountId)}</Text></View>
+            <View style={{ flex: 1 }}><Text style={styles.rowTitle}>{s.name}</Text><Text style={[styles.rowSubtitle, s.due < now && { color: C.red }]}>{s.due < now ? 'Overdue · ' : ''}{s.due} · {s.repeat} · {accountName(s.accountId)}{s.kind === 'card_payment' ? ` → ${accountName(s.toAccountId)} · Card repayment` : ''}</Text></View>
             <View style={{ alignItems: 'flex-end', gap: 7 }}><Text style={styles.rowAmount}>{money(s.amountCents)}</Text><Button title="Record paid" small secondary onPress={() => recordPayment(s)}/><View style={{ flexDirection:'row', gap:12 }}><Text style={styles.inlineAction} onPress={() => openSchedule(s)}>Edit</Text><Text style={[styles.inlineAction, { color: C.red }]} onPress={() => confirmRemove('schedule', s.id)}>Delete</Text></View></View>
           </View>)}
         </View>
       </>}
       {tab === 'analytics' && <>
-        <View style={styles.filterRow}><Pill title="This week" active={period === 'week'} onPress={() => setPeriod('week')}/><Pill title="This month" active={period === 'month'} onPress={() => setPeriod('month')}/></View>
-        <View style={styles.card}><Text style={styles.subtle}>{range[0]} to {range[1]}</Text><View style={[styles.metricsRow, { marginTop: 18 }]}><Metric label="Income" value={money(totals.income)} color={C.green}/><Metric label="Expenses" value={money(totals.expenses)} color={C.red}/></View><View style={styles.lightDivider}/><Metric label="Net cash flow" value={money(totals.net)} color={totals.net >= 0 ? C.green : C.red}/></View>
-        <View style={styles.card}><SectionTitle>Spending over time</SectionTitle><Chart series={series}/><Text style={styles.helper}>Only recorded expenses are included; transfers and scheduled but unpaid items are excluded.</Text></View>
-        <View style={styles.card}><SectionTitle>By category</SectionTitle>
-          {!groups.length ? <EmptyMessage title="No expenses for this period" detail="Record an expense to see the breakdown." /> : groups.map(([name, cents]) => <View key={name} style={{ marginBottom: 18, gap: 7 }}><View style={styles.between}><Text style={styles.rowTitle}>{name}</Text><Text style={styles.rowAmount}>{money(cents)} · {Math.round(cents / Math.max(1, totals.expenses) * 100)}%</Text></View><View style={styles.track}><View style={[styles.fill, { width: `${cents / Math.max(1, totals.expenses) * 100}%`, backgroundColor: CATEGORY_COLORS[name] || C.blue }]}/></View></View>)}
+        <View style={styles.filterRow}>
+          <Pill title="This week" active={period === 'week'} onPress={() => setPeriod('week')}/>
+          <Pill title="This month" active={period === 'month'} onPress={() => setPeriod('month')}/>
+          <Pill title="This year" active={period === 'year'} onPress={() => setPeriod('year')}/>
+          <Pill title="Custom dates" active={period === 'custom'} onPress={() => { setPeriod('custom'); setInsightError(''); }}/>
         </View>
-        <View style={styles.card}><SectionTitle>Quick summary</SectionTitle><Text style={styles.summary}>{totals.expenses ? `You recorded ${money(totals.expenses)} in spending ${period === 'week' ? 'this week' : 'this month'}. ${groups[0]?.[0] || 'Other'} is your largest category (${money(groups[0]?.[1] || 0)}).` : 'You have not recorded any expenses in this period yet.'}</Text></View>
+        {period === 'custom' ? <View style={styles.card}>
+          <LabeledInput label="Start date (YYYY-MM-DD)" value={insightStart} onChangeText={setInsightStart}/>
+          <LabeledInput label="End date (YYYY-MM-DD)" value={insightEnd} onChangeText={setInsightEnd}/>
+          <Button title="Apply date range" onPress={applyCustom}/>
+          {insightError ? <Text style={styles.errorBanner}>{insightError}</Text> : null}
+        </View> : null}
+        <View style={styles.card}><Text style={styles.subtle}>{range[0]} to {range[1]}</Text><View style={[styles.metricsRow, { marginTop: 18 }]}><Metric label="Income" value={money(totals.income)} color={C.green}/><Metric label="Expenses" value={money(totals.expenses)} color={C.red}/></View><View style={styles.lightDivider}/><View style={styles.metricsRow}><Metric label="Net cash flow" value={money(totals.net)} color={totals.net >= 0 ? C.green : C.red}/><Metric label="Savings rate" value={totals.income > 0 ? `${Math.round(totals.net/totals.income*100)}%` : '—'} /></View></View>
+        <View style={styles.card}><SectionTitle>Spending over selected period</SectionTitle><Chart series={insightSeries}/><Text style={styles.helper}>Recorded expenses include card purchases. Transfers, card repayments and unpaid schedules are excluded.</Text></View>
+        <View style={styles.card}><SectionTitle>By category</SectionTitle>
+          {!groups.length ? <EmptyMessage title="No expenses for this period" detail="Record an expense to see the breakdown." /> : groups.map(([name, cents]) => <View key={name} style={{ marginBottom: 18, gap: 7 }}><View style={styles.between}><Text style={styles.rowTitle}>{name}</Text><Text style={styles.rowAmount}>{money(cents)} · {Math.round(cents / Math.max(1, totals.expenses) * 100)}%</Text></View><View style={styles.track}><View style={[styles.fill, { width: `${cents / Math.max(1, totals.expenses) * 100}%`, backgroundColor: categoryColor(name) }]}/></View></View>)}
+        </View>
+        <View style={styles.card}><SectionTitle>Insights</SectionTitle>
+          <Text style={styles.summary}>{totals.expenses ? `You spent ${money(totals.expenses)} between ${range[0]} and ${range[1]}. Your largest category was ${groups[0]?.[0]} (${money(groups[0]?.[1] || 0)}).` : 'You have no recorded expenses in this period.'}</Text>
+          <Text style={styles.summary}>{expenseChange === null ? `Previous equivalent period: ${money(prevTotals.expenses)} in expenses.` : `Compared with the previous equivalent period (${prevRange[0]} to ${prevRange[1]}), your spending ${expenseChange > 0 ? `increased ${expenseChange}%` : expenseChange < 0 ? `decreased ${Math.abs(expenseChange)}%` : 'was unchanged'}.`}</Text>
+          {topTransaction ? <Text style={styles.summary}>Largest single expense: {money(topTransaction.amountCents)} for {topTransaction.description} ({topTransaction.date}).</Text> : null}
+          <Text style={styles.helper}>These are rule-based summaries of manually entered data, not financial advice.</Text>
+        </View>
       </>}
       {tab === 'accounts' && <>
-        <View style={styles.toolbar}><Text style={[styles.subtle,{flex:1}]}>Opening balance + recorded activity = current balance.</Text><Button title="+ Account" small onPress={() => openAccount()}/></View>
-        {!accounts.length ? <View style={styles.card}><EmptyMessage title="Add your first account" detail="Start with a bank, savings or cash account."/></View> : accounts.map(a => <View style={styles.accountCard} key={a.id}><View style={styles.between}><View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }}><View style={[styles.accountLogo, { backgroundColor: a.color }]}><Text style={{ color:'#fff', fontWeight:'800', fontSize:21 }}>{a.name.slice(0,1).toUpperCase()}</Text></View><View><Text style={styles.rowTitle}>{a.name}</Text><Text style={styles.rowSubtitle}>{a.kind} account</Text></View></View><Text style={styles.accountMoney} numberOfLines={1} adjustsFontSizeToFit>{money(accountBalance(a, transactions))}</Text></View><View style={styles.lightDivider}/><View style={styles.between}><Text style={styles.helper}>Opening: {money(a.openingCents)}</Text><View style={{ flexDirection:'row', gap:16 }}><Text style={styles.inlineAction} onPress={() => openAccount(a)}>Edit</Text><Text style={[styles.inlineAction, { color:C.red }]} onPress={() => confirmRemove('account', a.id)}>Delete</Text></View></View></View>)}
-        <View style={styles.card}><SectionTitle>Privacy and data</SectionTitle><Text style={styles.summary}>This prototype stores your data locally on this device. It does not connect to a bank or upload transactions to a server. Local app storage is not separately encrypted or backed up.</Text><View style={{ marginTop: 14 }}><Button title="Erase everything / restart" secondary onPress={resetAll}/></View></View>
+        <View style={styles.toolbar}><Text style={[styles.subtle,{flex:1}]}>Asset balances less credit card amounts owed = net worth.</Text><Button title="+ Account" small onPress={() => openAccount()}/></View>
+        {!accounts.length ? <View style={styles.card}><EmptyMessage title="Add your first account" detail="Start with a bank, savings, cash or credit card account."/></View> : accounts.map(a => {
+          const current = accountBalance(a, transactions);
+          const card = a.kind === 'Credit Card';
+          const remainingCredit = (a.creditLimitCents || 0) - current;
+          return <View style={styles.accountCard} key={a.id}>
+            <View style={styles.between}>
+              <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center', flex:1 }}><View style={[styles.accountLogo, { backgroundColor: a.color }]}><Text style={{ color:'#fff', fontWeight:'800', fontSize:21 }}>{a.name.slice(0,1).toUpperCase()}</Text></View><View style={{ flex: 1 }}><Text style={styles.rowTitle}>{a.name}</Text><Text style={styles.rowSubtitle}>{a.kind}{card ? (current >= 0 ? ' · owed' : ' · credit balance') : ' account'}</Text></View></View>
+              <Text style={styles.accountMoney} numberOfLines={1} adjustsFontSizeToFit>{money(card ? Math.abs(current) : current)}</Text>
+            </View>
+            {card && a.creditLimitCents > 0 ? <Text style={[styles.helper, {marginTop:10}]}>Credit limit: {money(a.creditLimitCents)} · Available: {money(Math.max(0, remainingCredit))}{remainingCredit < 0 ? ' · Over limit' : ''}</Text> : null}
+            <View style={styles.lightDivider}/>
+            <View style={styles.between}><Text style={styles.helper}>{card ? 'Opening owed' : 'Opening balance'}: {money(a.openingCents)}</Text><View style={{ flexDirection:'row', gap:14 }}>
+              {card && accounts.some(b => b.kind !== 'Credit Card') ? <Text style={styles.inlineAction} onPress={() => openTransaction(null, { type:'transfer', accountId: accounts.find(b=>b.kind !== 'Credit Card').id, toAccountId:a.id, category:'Transfer', description:`Payment to ${a.name}` })}>Repay</Text> : null}
+              <Text style={styles.inlineAction} onPress={() => openAccount(a)}>Edit</Text><Text style={[styles.inlineAction, { color:C.red }]} onPress={() => confirmRemove('account', a.id)}>Delete</Text>
+            </View></View>
+          </View>;
+        })}
+        <View style={styles.card}>
+          <SectionTitle side={<Button title="+ Category" small onPress={() => openCategory()}/>}>Spending categories</SectionTitle>
+          <Text style={styles.subtle}>Create, rename, recolour or delete categories. Changes are reflected in existing expense records and charts.</Text>
+          {categories.map(c => <View key={c.name} style={styles.miniRow}><View style={[styles.categoryDot, {backgroundColor:c.color}]}/><Text style={[styles.rowTitle,{flex:1}]}>{c.name}</Text>
+            <Text style={styles.inlineAction} onPress={() => openCategory(c)}>Edit</Text>
+            {c.name !== 'Other' ? <Text style={[styles.inlineAction,{color:C.red,marginLeft:14}]} onPress={()=>removeCategory(c.name)}>Delete</Text> : null}
+          </View>)}
+        </View>
+        <View style={styles.card}><SectionTitle>Backup and restore</SectionTitle>
+          <Text style={styles.summary}>Export a backup to the iOS share sheet, then select Save to Files → iCloud Drive. To restore, choose the backup from Files. This is a manual file backup, not automatic iCloud syncing.</Text>
+          <Text style={styles.helper}>Privacy: backups are readable JSON and are NOT password-encrypted. Keep them in your private iCloud Drive, do not share publicly, and confirm each export was saved. Restoring replaces your current local data.</Text>
+          <Button title={backupBusy ? 'Working…' : 'Back up to Files / iCloud Drive'} onPress={exportBackup} disabled={backupBusy}/>
+          <Button title="Restore a backup" secondary onPress={importBackup} disabled={backupBusy}/>
+        </View>
+        <View style={styles.card}><SectionTitle>Privacy and data</SectionTitle><Text style={styles.summary}>Your transaction records stay on this device unless you intentionally export a backup. Local AsyncStorage and exported backup files are not independently encrypted. No banking logins or servers are used.</Text><Button title="Erase everything / restart" secondary onPress={resetAll}/></View>
       </>}
     </ScrollView>
     <View style={styles.tabBar}>{NAV.map(([key, icon, label]) => <Pressable key={key} onPress={() => setTab(key)} style={styles.tabItem}><Text style={[styles.tabIcon, tab===key && {color:C.blue}]}>{icon}</Text><Text style={[styles.tabText, tab===key && {color:C.blue, fontWeight:'800'}]}>{label}</Text></Pressable>)}</View>
     <Modal visible={!!modal} animationType="slide" presentationStyle="pageSheet" onRequestClose={closeModal}>
       <SafeAreaView style={styles.modalScreen}><KeyboardAvoidingView style={{ flex:1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={styles.modalHeader}><Text style={styles.modalTitle}>{editingId ? 'Edit' : 'New'} {modal === 'transaction' ? 'transaction' : modal === 'account' ? 'account' : 'planned payment'}</Text><Text onPress={closeModal} style={styles.close}>Close</Text></View>
+        <View style={styles.modalHeader}><Text style={styles.modalTitle}>{editingId ? 'Edit' : 'New'} {modal === 'transaction' ? 'transaction' : modal === 'account' ? 'account' : modal === 'category' ? 'spending category' : 'planned payment'}</Text><Text onPress={closeModal} style={styles.close}>Close</Text></View>
         <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 55, gap: 20 }} keyboardShouldPersistTaps="handled">
           {modal === 'transaction' && <>
-            <View style={styles.filterRow}>{[['expense','Expense'],['income','Income'],['transfer','Transfer']].map(([k,l]) => <Pill key={k} title={l} active={draft.type===k} onPress={() => setDraft(x => ({...x, type:k, category:k==='income'?'Salary':'Groceries'}))}/>)}</View>
+            <View style={styles.filterRow}>{[['expense','Expense'],['income','Income'],['transfer','Transfer']].map(([k,l]) => <Pill key={k} title={l} active={draft.type===k} onPress={() => setDraft(x => ({...x, type:k, category:k==='income'?'Salary': k==='transfer'?'Transfer':categories[0]?.name || 'Other'}))}/>)}</View>
             <LabeledInput label="Amount (AUD)" value={draft.amount} onChangeText={amount => setDraft(x=>({...x,amount}))} placeholder="0.00" keyboardType="decimal-pad" />
             <LabeledInput label="Description" value={draft.description} onChangeText={description => setDraft(x=>({...x,description}))} placeholder="e.g. Weekly groceries" />
             <LabeledInput label="Date (YYYY-MM-DD)" value={draft.date} onChangeText={date => setDraft(x=>({...x,date}))} placeholder="2026-11-04" />
+            <LabeledInput label="Time (HH:mm, 24-hour)" value={draft.time || ''} onChangeText={time => setDraft(x=>({...x,time}))}
+              placeholder="e.g. 14:35" hint={editingId && !draft.time ? 'This older entry has no recorded time. Leave blank if unknown, or enter the actual time.' : 'Defaults to the local time when you opened New transaction; you can change it.'}/>
+
             <Text style={styles.fieldLabel}>{draft.type === 'transfer' ? 'From account' : 'Account'}</Text><View style={styles.chips}>{accounts.map(a=><Pill key={a.id} title={a.name} active={draft.accountId===a.id} onPress={()=>setDraft(x=>({...x,accountId:a.id}))}/>)}</View>
-            {draft.type === 'transfer' ? <><Text style={styles.fieldLabel}>To account</Text><View style={styles.chips}>{accounts.filter(a=>a.id!==draft.accountId).map(a=><Pill key={a.id} title={a.name} active={draft.toAccountId===a.id} onPress={()=>setDraft(x=>({...x,toAccountId:a.id}))}/>)}</View></> : <><Text style={styles.fieldLabel}>Category</Text><View style={styles.chips}>{(draft.type==='income'?INCOME_CATEGORIES:EXPENSE_CATEGORIES).map(c=><Pill key={c} title={c} active={draft.category===c} onPress={()=>setDraft(x=>({...x,category:c}))}/>)}</View></>}
+            {draft.type === 'transfer' ? <><Text style={styles.fieldLabel}>To account</Text><View style={styles.chips}>{accounts.filter(a=>a.id!==draft.accountId).map(a=><Pill key={a.id} title={a.name} active={draft.toAccountId===a.id} onPress={()=>setDraft(x=>({...x,toAccountId:a.id}))}/>)}</View><Text style={styles.helper}>Credit-card repayments should be transfers from your bank to the card, not expenses. Card purchases should be recorded as expenses on the card.</Text></> : <><Text style={styles.fieldLabel}>Category</Text><View style={styles.chips}>{(draft.type==='income'?INCOME_CATEGORIES:categories.map(c=>c.name)).map(c=><Pill key={c} title={c} active={draft.category===c} onPress={()=>setDraft(x=>({...x,category:c}))}/>)}</View></>}
           </>}
           {modal === 'account' && <>
             <LabeledInput label="Account name" value={draft.name} onChangeText={name=>setDraft(x=>({...x,name}))} placeholder="e.g. Everyday" />
-            <Text style={styles.fieldLabel}>Account type</Text><View style={styles.chips}>{['Bank','Savings','Cash'].map(kind=><Pill key={kind} title={kind} active={draft.kind===kind} onPress={()=>setDraft(x=>({...x,kind}))}/>)}</View>
-            <LabeledInput label="Opening balance (AUD)" value={draft.opening} onChangeText={opening=>setDraft(x=>({...x,opening}))} keyboardType="decimal-pad" hint="Balance before your first recorded transaction. Use your balance before the first transaction you plan to enter." />
+            <Text style={styles.fieldLabel}>Account type</Text><View style={styles.chips}>{['Bank','Savings','Cash','Credit Card'].map(kind=><Pill key={kind} title={kind} active={draft.kind===kind} onPress={()=>setDraft(x=>({...x,kind}))}/>)}</View>
+            <LabeledInput label={draft.kind === 'Credit Card' ? 'Opening debt owed (AUD)' : 'Opening balance (AUD)'} value={draft.opening} onChangeText={opening=>setDraft(x=>({...x,opening}))} keyboardType="decimal-pad" hint={draft.kind === 'Credit Card' ? 'Amount already owed on this credit card before your first recorded transaction. Enter 0 if nothing is owed.' : 'Balance before your first recorded transaction. Use your balance before the first transaction you plan to enter.'} />
+            {draft.kind === 'Credit Card' ? <LabeledInput label="Credit limit (AUD)" value={draft.creditLimit} onChangeText={creditLimit=>setDraft(x=>({...x,creditLimit}))} keyboardType="decimal-pad" hint="Optional: use 0 if you do not want to track available credit." /> : null}
             <Text style={styles.fieldLabel}>Colour</Text><View style={styles.chips}>{ACCOUNT_COLORS.map(color=><Pressable key={color} onPress={()=>setDraft(x=>({...x,color}))} style={[styles.colorDot,{backgroundColor:color,borderWidth:draft.color===color?4:0,borderColor:'#DAE0EF'}]}/>)}</View>
           </>}
           {modal === 'schedule' && <>
+            <Text style={styles.fieldLabel}>Planned payment type</Text>
+            <View style={styles.chips}><Pill title="Expense / card purchase" active={(draft.kind || 'expense')==='expense'} onPress={()=>setDraft(x=>({...x,kind:'expense'}))}/><Pill title="Credit card repayment" active={draft.kind==='card_payment'} onPress={()=>setDraft(x=>({...x,kind:'card_payment',accountId:accounts.find(a=>a.kind !== 'Credit Card')?.id, toAccountId:accounts.find(a=>a.kind === 'Credit Card')?.id}))}/></View>
             <LabeledInput label="Name" value={draft.name} onChangeText={name=>setDraft(x=>({...x,name}))} placeholder="e.g. Rent" />
             <LabeledInput label="Amount (AUD)" value={draft.amount} onChangeText={amount=>setDraft(x=>({...x,amount}))} placeholder="0.00" keyboardType="decimal-pad" />
             <LabeledInput label="First due date (YYYY-MM-DD)" value={draft.startDate} onChangeText={startDate=>setDraft(x=>({...x,startDate}))}/>
             <Text style={styles.fieldLabel}>Repeat</Text><View style={styles.chips}>{REPEATS.map(repeat=><Pill key={repeat} title={repeat} active={draft.repeat===repeat} onPress={()=>setDraft(x=>({...x,repeat}))}/>)}</View>
-            <Text style={styles.fieldLabel}>Account</Text><View style={styles.chips}>{accounts.map(a=><Pill key={a.id} title={a.name} active={draft.accountId===a.id} onPress={()=>setDraft(x=>({...x,accountId:a.id}))}/>)}</View>
-            <Text style={styles.fieldLabel}>Category</Text><View style={styles.chips}>{EXPENSE_CATEGORIES.map(category=><Pill key={category} title={category} active={draft.category===category} onPress={()=>setDraft(x=>({...x,category}))}/>)}</View>
+            <Text style={styles.fieldLabel}>{draft.kind==='card_payment' ? 'Pay from account' : 'Account'}</Text><View style={styles.chips}>{accounts.filter(a=>draft.kind !== 'card_payment' || a.kind !== 'Credit Card').map(a=><Pill key={a.id} title={a.name} active={draft.accountId===a.id} onPress={()=>setDraft(x=>({...x,accountId:a.id}))}/>)}</View>
+            {draft.kind === 'card_payment' ? <>
+              <Text style={styles.fieldLabel}>Pay credit card</Text><View style={styles.chips}>{accounts.filter(a=>a.kind === 'Credit Card').map(a=><Pill key={a.id} title={a.name} active={draft.toAccountId===a.id} onPress={()=>setDraft(x=>({...x,toAccountId:a.id}))}/>)}</View>
+              <Text style={styles.helper}>Recording this schedule creates an internal transfer and reduces card debt; it will not count as additional spending.</Text>
+            </> : <><Text style={styles.fieldLabel}>Category</Text><View style={styles.chips}>{categories.map(c=><Pill key={c.name} title={c.name} active={draft.category===c.name} onPress={()=>setDraft(x=>({...x,category:c.name}))}/>)}</View></>}
           </>}
+          {modal === 'category' && <>
+            <LabeledInput label="Category name" value={draft.name} onChangeText={name=>setDraft(x=>({...x,name}))} placeholder="e.g. Pets"/>
+            <Text style={styles.fieldLabel}>Category colour</Text><View style={styles.chips}>{ACCOUNT_COLORS.map(color=><Pressable key={color} accessibilityRole="button" accessibilityLabel={`Colour ${color}`} onPress={()=>setDraft(x=>({...x,color}))} style={[styles.colorDot,{backgroundColor:color,borderWidth:draft.color===color?4:0,borderColor:'#D4DEED'}]}/>)}</View>
+            <Text style={styles.helper}>Renaming a category updates the category label on existing expenses and planned payments. Deleting reassigns them to Other.</Text>
+          </>}
+          {modal === 'transaction' && editingId ? <Button title="Delete this transaction" secondary onPress={() => confirmRemove('transaction', editingId)}/> : null}
           {!!error && <Text style={styles.errorBanner}>{error}</Text>}
-          <Button title={editingId ? 'Save changes' : modal==='transaction' ? 'Add transaction' : modal==='account' ? 'Add account' : 'Add planned payment'} onPress={modal==='transaction'?saveTransaction:modal==='account'?saveAccount:saveSchedule}/>
+          <Button title={editingId ? 'Save changes' : modal==='transaction' ? 'Add transaction' : modal==='account' ? 'Add account' : modal==='category' ? 'Add category' : 'Add planned payment'} onPress={modal==='transaction'?saveTransaction:modal==='account'?saveAccount:modal==='category'?saveCategory:saveSchedule}/>
         </ScrollView>
       </KeyboardAvoidingView></SafeAreaView>
     </Modal>
@@ -402,7 +789,7 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  screen:{flex:1,backgroundColor:C.pale}, page:{paddingHorizontal:18,paddingTop:17,paddingBottom:28,gap:17},
+  screen:{flex:1,backgroundColor:C.pale}, page:{paddingHorizontal:18,paddingTop:17,paddingBottom:28,gap:17},activityPage:{paddingHorizontal:12,paddingTop:10,paddingBottom:14,gap:9},
   header:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',marginBottom:2},
   eyebrow:{color:C.mute,fontSize:10,fontWeight:'800',letterSpacing:1.5},pageTitle:{fontSize:29,fontWeight:'800',color:C.ink,marginTop:5,letterSpacing:-.8},
   avatar:{width:43,height:43,borderRadius:15,backgroundColor:'#E8EBFD',alignItems:'center',justifyContent:'center'},
@@ -413,17 +800,28 @@ const styles = StyleSheet.create({
   metricsRow:{flexDirection:'row',gap:18},metricLabel:{color:C.mute,fontSize:12,fontWeight:'600',marginBottom:6},metricValue:{color:C.ink,fontSize:19,fontWeight:'800'},
   quickRow:{flexDirection:'row',gap:9},card:{backgroundColor:C.white,borderRadius:19,padding:18,gap:13,borderWidth:1,borderColor:'#EEF0F5'},
   sectionTitle:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',gap:8},sectionText:{fontSize:17,fontWeight:'800',color:C.ink},smallLink:{color:C.blue,fontSize:12,fontWeight:'800'},
-  chart:{marginTop:12},chartBars:{height:142,flexDirection:'row',gap:12,alignItems:'flex-end'},barItem:{flex:1,alignItems:'center',gap:8,height:'100%'},barTrack:{height:113,width:'100%',justifyContent:'flex-end',alignItems:'center',backgroundColor:'#F6F7FC',borderRadius:7,overflow:'hidden'},barFill:{width:'66%',borderTopLeftRadius:6,borderTopRightRadius:6},barLabel:{fontSize:10,color:C.mute,fontWeight:'700'},
-  miniRow:{flexDirection:'row',alignItems:'center',paddingVertical:11,borderTopWidth:1,borderTopColor:C.border},listRow:{flexDirection:'row',alignItems:'center',paddingVertical:12,borderBottomWidth:1,borderBottomColor:C.border,gap:11},
-  txIcon:{width:40,height:40,borderRadius:13,alignItems:'center',justifyContent:'center'},rowTitle:{color:C.ink,fontWeight:'800',fontSize:14},rowSubtitle:{color:C.mute,fontSize:11,marginTop:4},rowAmount:{color:C.ink,fontWeight:'800',fontSize:13},inlineAction:{fontSize:11,color:C.blue,fontWeight:'800'},
+  chart:{marginTop:12},chartBars:{height:142,flexDirection:'row',gap:12,alignItems:'flex-end'},barItem:{flex:1,alignItems:'center',gap:8,height:'100%'},barTrack:{height:113,width:'100%',justifyContent:'flex-end',alignItems:'center',backgroundColor:'#F6F7FC',borderRadius:7,overflow:'hidden'},barFill:{width:'66%',borderTopLeftRadius:6,borderTopRightRadius:6},barLabel:{fontSize:9,color:C.mute,fontWeight:'700',textAlign:'center'},
+  miniRow:{flexDirection:'row',alignItems:'center',paddingVertical:11,borderTopWidth:1,borderTopColor:C.border},
+  listRow:{flexDirection:'row',alignItems:'center',minHeight:46,paddingVertical:6,borderBottomWidth:1,borderBottomColor:C.border,gap:9},
+  activityToolbar:{flexDirection:'row',gap:8,alignItems:'center'},
+  searchInput:{backgroundColor:'#fff',borderWidth:1,borderColor:C.border,borderRadius:11,flex:1,height:40,paddingHorizontal:11,fontSize:13,color:C.ink},
+  activityMeta:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',gap:7},
+  activityCount:{flex:1,color:C.mute,fontSize:10},
+  activityList:{backgroundColor:'#fff',borderRadius:15,paddingHorizontal:10,borderWidth:1,borderColor:C.border,overflow:'hidden'},
+  activityDay:{marginBottom:1},
+  dayHeader:{paddingTop:9,paddingBottom:7,borderBottomWidth:1,borderBottomColor:C.border,gap:3},
+  dayHeaderDate:{fontSize:12,fontWeight:'800',color:C.ink},
+  dayTotals:{flexDirection:'row',gap:12},dayOut:{fontSize:10,color:C.red,fontWeight:'700'},dayIn:{fontSize:10,color:C.green,fontWeight:'700'},
+  txIcon:{width:30,height:30,borderRadius:10,alignItems:'center',justifyContent:'center'},rowTitle:{color:C.ink,fontWeight:'700',fontSize:13},rowSubtitle:{color:C.mute,fontSize:10,marginTop:2},rowAmount:{color:C.ink,fontWeight:'800',fontSize:12},inlineAction:{fontSize:11,color:C.blue,fontWeight:'800'},
   empty:{paddingVertical:25,paddingHorizontal:12,alignItems:'center'},emptyTitle:{fontSize:15,color:C.ink,fontWeight:'800',marginBottom:5},
   toolbar:{flexDirection:'row',alignItems:'center',gap:12},filterRow:{flexDirection:'row',gap:7,flexWrap:'wrap'},
-  pill:{borderWidth:1,borderColor:'#DFE4EF',borderRadius:22,paddingHorizontal:12,paddingVertical:9,backgroundColor:'#fff'},pillText:{fontSize:12,color:C.mute,fontWeight:'800'},
+  pill:{borderWidth:1,borderColor:'#DFE4EF',borderRadius:22,paddingHorizontal:12,paddingVertical:9,backgroundColor:'#fff'},compactPill:{paddingHorizontal:11,paddingVertical:6},pillText:{fontSize:12,color:C.mute,fontWeight:'800'},
   scheduleRow:{flexDirection:'row',gap:12,paddingVertical:16,borderBottomWidth:1,borderBottomColor:C.border},
   lightDivider:{height:1,backgroundColor:C.border,marginVertical:10},track:{height:9,backgroundColor:'#EFF2F8',borderRadius:7,overflow:'hidden'},fill:{height:9,borderRadius:7},between:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',gap:9},
   summary:{color:'#56637E',fontSize:13,lineHeight:21},accountCard:{padding:18,borderRadius:18,backgroundColor:'#fff',borderWidth:1,borderColor:'#EFF1F6'},accountLogo:{width:43,height:43,borderRadius:14,justifyContent:'center',alignItems:'center'},accountMoney:{fontSize:17,color:C.ink,fontWeight:'800',maxWidth:'40%'},
   tabBar:{flexDirection:'row',backgroundColor:'#fff',borderTopWidth:1,borderTopColor:C.border,paddingVertical:10,paddingHorizontal:3},tabItem:{flex:1,alignItems:'center',justifyContent:'center',gap:4},tabIcon:{fontSize:23,fontWeight:'800',color:'#A1AAC0'},tabText:{fontSize:10,color:'#8B96AA',fontWeight:'600'},
   modalScreen:{flex:1,backgroundColor:C.pale},modalHeader:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',padding:20,backgroundColor:'#fff',borderBottomWidth:1,borderBottomColor:C.border},modalTitle:{color:C.ink,fontSize:20,fontWeight:'800'},close:{fontSize:14,color:C.blue,fontWeight:'800'},
   fieldLabel:{fontSize:13,fontWeight:'800',color:C.ink},input:{backgroundColor:'#fff',borderColor:'#DDE4EF',borderWidth:1,borderRadius:12,paddingHorizontal:14,paddingVertical:13,fontSize:16,color:C.ink},helper:{fontSize:11,color:C.mute,lineHeight:17},chips:{flexDirection:'row',flexWrap:'wrap',gap:7},colorDot:{width:35,height:35,borderRadius:18},
+  categoryDot:{width:21,height:21,borderRadius:7,marginRight:10},
   errorBanner:{color:'#9A2D46',backgroundColor:'#FFE7ED',padding:12,borderRadius:9,fontSize:12},demoBanner:{backgroundColor:'#FFF5DF',borderRadius:12,padding:11},demoText:{color:'#9B6D25',fontSize:11,lineHeight:17},
 });
