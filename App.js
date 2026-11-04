@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert as NativeAlert, KeyboardAvoidingView, Modal, Platform,
+  ActivityIndicator, KeyboardAvoidingView, Modal, Platform,
   Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet,
   Text, TextInput, View,
 } from 'react-native';
@@ -10,7 +10,7 @@ import cashFlow from './cashFlowCore';
 // Pocket Ledger — iPhone-installable PWA, offline/manual-only personal ledger.
 // Amounts are kept as integer cents to avoid floating-point currency errors.
 // On web, React Native Alert is not implemented. Preserve all confirmations.
-const Alert = Platform.OS === 'web' ? {
+const Alert = {
   alert(title, message = '', actions) {
     if (typeof window === 'undefined') return;
     const prompt = `${title}${message ? `\n\n${message}` : ''}`;
@@ -18,7 +18,7 @@ const Alert = Platform.OS === 'web' ? {
     const accepted = actions.find(a => typeof a.onPress === 'function' && a.style !== 'cancel');
     if (accepted && window.confirm(prompt)) accepted.onPress();
   },
-} : NativeAlert;
+};
 
 const STORAGE_KEY = 'pocket-ledger-v1'; // Keep this key to preserve v0.1/v0.2 data.
 const BACKUP_FORMAT = 'pocket-ledger-backup';
