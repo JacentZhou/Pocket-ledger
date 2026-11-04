@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { recoverAutomaticBackup, uploadAutomaticBackup } from './icloudBackup';
+import cashFlow from './cashFlowCore';
 
 // Pocket Ledger — personal finance MVP, offline/manual only.
 // Amounts are kept as integer cents to avoid floating-point currency errors.
@@ -82,9 +83,10 @@ function normalizeData(d) {
         ...(kind === 'expense' ? {color:CATEGORY_COLORS[item.category] || ACCOUNT_COLORS[0]} : {}) });
     }
   }
-  return { ...d, categories, incomeCategories, autoPostPlannedExpenses: !!d.autoPostPlannedExpenses,
+  return { ...d, categories, incomeCategories, autoPostPlannedExpenses: false,
     transactions: transactions.map(t => ({ ...t, time: parseTime(t.time) || null })),
-    accounts: accounts.map(a => ({ ...a, creditLimitCents: Number.isSafeInteger(a.creditLimitCents) ? a.creditLimitCents : 0 })) };
+    accounts: accounts.map(a => ({ ...a, creditLimitCents: Number.isSafeInteger(a.creditLimitCents) ? a.creditLimitCents : 0,
+      minBufferCents: Number.isSafeInteger(a.minBufferCents) && a.minBufferCents >= 0 ? a.minBufferCents : 0 })) };
 }
 const REPEATS = ['None', 'Weekly', 'Fortnightly', 'Monthly', 'Yearly'];
 const money = (cents) => new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD' }).format(cents / 100);
@@ -332,7 +334,8 @@ function readBackup(raw) {
   const ids = new Set(d.accounts.map(a => a.id));
   if (!d.accounts.every(a => typeof a.name === 'string' && a.name.trim() && ['Bank','Savings','Cash','Credit Card'].includes(a.kind)
     && Number.isSafeInteger(a.openingCents) && a.openingCents >= 0
-    && (!('creditLimitCents' in a) || (Number.isSafeInteger(a.creditLimitCents) && a.creditLimitCents >= 0))))
+    && (!('creditLimitCents' in a) || (Number.isSafeInteger(a.creditLimitCents) && a.creditLimitCents >= 0))
+    && (!('minBufferCents' in a) || (Number.isSafeInteger(a.minBufferCents) && a.minBufferCents >= 0))))
     throw new Error('The backup contains an invalid account.');
   if (!d.transactions.every(t => ['income','expense','transfer'].includes(t.type) && parseDate(t.date)
     && (!t.time || parseTime(t.time)) && Number.isSafeInteger(t.amountCents) && t.amountCents > 0
@@ -418,9 +421,8 @@ function SettingsMenuRow({ icon, title, detail, onPress }) {
   </Pressable>;
 }
 const SETTINGS_TITLES = {
-  menu:'Settings', planned:'Planned payments', expenses:'Spending categories',
-  income:'Income categories', accounts:'Account management',
-  backup:'iCloud backup', privacy:'Privacy & data',
+  menu:'Settings', planned:'Planned payments', expenses:'Spending categories', income:'Income categories',
+  accounts:'Account management', backup:'iCloud backup', privacy:'Privacy & data',
 };
 function Metric({ label, value, color }) {
   return <View style={{ flex: 1, minWidth: 105 }}><Text style={styles.metricLabel}>{label}</Text><Text style={[styles.metricValue, color && { color }]} numberOfLines={1} adjustsFontSizeToFit>{value}</Text></View>;
@@ -460,6 +462,54 @@ function ActivityDay({ group, onEdit, accountName, categoryIcon }) {
   </View>;
 }
 
+function ForecastBalanceChart({ daily, account, buffer = 0, onSelect }) {
+  if (!daily.length || !account) return null;
+  const credit=account.kind==='Credit Card';
+  const values=daily.map(d=>credit && account.creditLimitCents>0 ? account.creditLimitCents-d.balances[account.id] : d.balances[account.id]);
+  const low=Math.min(...values,buffer,0),high=Math.max(...values,buffer,0);
+  const margin=6, range=Math.max(1,high-low), h=145, step=27;
+  const width=Math.max(310,margin*2+step*Math.max(1,values.length-1));
+  const y=v=>16+(high-v)/range*(h-32);
+  return <View>
+    <Text style={styles.helper}>{credit ? (account.creditLimitCents>0?'Available credit':'Card debt (higher means more owed)') : 'Projected balance'} · each point is one day. Tap to inspect.</Text>
+    <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={{paddingVertical:8}}>
+      <View style={{height:h+34,width,backgroundColor:'#F8FAFE',borderRadius:12,overflow:'hidden'}}>
+        <View style={{position:'absolute',left:0,right:0,top:y(buffer),borderTopWidth:1,borderColor:C.red,borderStyle:'dashed'}}/>
+        {values.slice(1).map((v,i)=>{
+          const x1=margin+i*step,x2=x1+step,y1=y(values[i]),y2=y(v),distance=Math.hypot(x2-x1,y2-y1);
+          return <View key={`line-${i}`} style={{position:'absolute',left:(x1+x2-distance)/2,top:(y1+y2)/2-1.5,
+            width:distance,height:3,borderRadius:3,backgroundColor:Math.min(v,values[i])<buffer?C.red:C.blue,
+            transform:[{rotate:`${Math.atan2(y2-y1,x2-x1)}rad`}]}}/>;
+        })}
+        {values.map((value,i)=><Pressable key={`dot-${i}`} accessibilityRole="button" accessibilityLabel={`${daily[i].date}, projected ${money(value)}`}
+          onPress={()=>onSelect(daily[i].date,value)} style={{position:'absolute',left:margin+i*step-6,top:y(value)-6,width:12,height:12,borderRadius:7,
+            borderColor:'#FFF',borderWidth:2,backgroundColor:value<buffer?C.red:C.blue}}/>)}
+        {daily.filter((_,i)=>i===0||i===daily.length-1||i%Math.max(1,Math.ceil(daily.length/7))===0).map(d=>{
+          const i=daily.indexOf(d);return <Text key={`label-${i}`} style={{position:'absolute',left:Math.max(0,margin+i*step-12),top:h+3,fontSize:10,color:C.mute}}>{d.date.slice(5)}</Text>;
+        })}
+      </View>
+    </ScrollView>
+    <Text style={styles.helper}>Blue = at/above your buffer · Red = below buffer · Horizontal dashed line = buffer ({money(buffer)})</Text>
+  </View>;
+}
+function PlannedEventRow({event, account, accountName, onPress}) {
+  const paid=event.source==='recorded', incoming=event.type==='income';
+  const cardPayment=event.type==='transfer';
+  const relatedAccount=account?.(event.accountId);
+  const after=event.balanceAfter?.[event.accountId];
+  const available=relatedAccount && after!=null ? cashFlow.availableAmount(relatedAccount,after):null;
+  return <Pressable accessibilityRole="button" accessibilityLabel={`${event.description}, due ${event.due}, ${money(event.amountCents)}, ${paid?'recorded':'tap to record or edit'}`} onPress={onPress} style={styles.scheduleRow}>
+    <View style={styles.txIcon}><Text style={{fontSize:18}}>{cardPayment?'💳':incoming?'💰':'🧾'}</Text></View>
+    <View style={{flex:1,minWidth:0,gap:2}}>
+      <Text style={styles.rowTitle} numberOfLines={1}>{event.description}</Text>
+      <Text style={[styles.rowSubtitle,event.overdue&&{color:C.red}]} numberOfLines={2}>
+        {event.due}{event.overdue?' · overdue':''}{paid?' · Recorded':''} · {accountName(event.accountId)}
+      </Text>
+      {available!=null&&<Text style={styles.helper}>After: {money(available)}{relatedAccount?.kind==='Credit Card'?' available credit':''}</Text>}
+    </View>
+    <Text style={[styles.rowAmount,{color:incoming?C.green:cardPayment?C.mute:C.red}]}>{incoming?'+':cardPayment?'':'−'}{money(event.amountCents)}</Text>
+  </Pressable>;
+}
 function Chart({ series, accent = C.blue }) {
   const high = Math.max(1, ...series.map(x => x.value));
   return <ScrollView style={styles.chart} horizontal showsHorizontalScrollIndicator={series.length > 7} contentContainerStyle={{ flexGrow: 1 }}>
@@ -481,6 +531,11 @@ export default function App() {
   const [tab, setTab] = useState('home');
   const [settingsPage, setSettingsPage] = useState('menu');
   const [plannedView, setPlannedView] = useState('all');
+  const [plannedSection, setPlannedSection] = useState('forecast');
+  const [forecastDays, setForecastDays] = useState(30);
+  const [forecastAccountId, setForecastAccountId] = useState(null);
+  const [calendarMonth, setCalendarMonth] = useState(`${today().slice(0,7)}-01`);
+  const [selectedCalendarDay, setSelectedCalendarDay] = useState(today());
   const [activeDay, setActiveDay] = useState(today());
   const [period, setPeriod] = useState('month');
   const [filter, setFilter] = useState('all');
@@ -639,35 +694,36 @@ export default function App() {
   const categoryIcon = t => t.type === 'transfer' ? CATEGORY_ICONS.Transfer :
     (t.type === 'income' ? incomeCategories : categories).find(c => c.name === t.category)?.icon
       || CATEGORY_ICONS[t.category] || (t.type === 'income' ? '💰' : '📦');
-  useEffect(() => {
-    if (loading || !data?.autoPostPlannedExpenses) return;
-    const firstDay = `${activeDay.slice(0,7)}-01`;
-    setData(previous => {
-      if (!previous?.autoPostPlannedExpenses) return previous;
-      return postPlannedMonth(previous, firstDay);
-    });
-  }, [loading, data, activeDay]);
-  const balance = netWorth(accounts, transactions);
-  const creditDebt = accounts.filter(a => a.kind === 'Credit Card').reduce((sum, a) => sum + Math.max(0, accountBalance(a, transactions)), 0);
+  const actualToDate = transactions.filter(t => t.date <= now);
+  const balance = netWorth(accounts, actualToDate);
+  const creditDebt = accounts.filter(a => a.kind === 'Credit Card').reduce((sum, a) => sum + Math.max(0, accountBalance(a, actualToDate)), 0);
   const range = period === 'year' ? [`${now.slice(0, 4)}-01-01`, now] : period === 'custom' ? appliedCustom : period === 'week' ? [weekStart(now), now] : [`${now.slice(0,7)}-01`, now];
   const prevRange = previousRange(range[0], range[1]);
-  const prevTotals = periodTotals(transactions, ...prevRange);
-  const totals = periodTotals(transactions, range[0], range[1]);
-  const groups = categoryTotals(transactions, range[0], range[1]);
-  const scheduled = schedules.map(s => ({ ...s, due: dueDate(s, now) })).filter(s => s.due).sort((a,b) => a.due.localeCompare(b.due));
+  const prevTotals = periodTotals(actualToDate, ...prevRange);
+  const totals = periodTotals(actualToDate, range[0], range[1]);
+  const groups = categoryTotals(actualToDate, range[0], range[1]);
+  const scheduled = schedules.map(s => ({ ...s, due: cashFlow.nextPendingDue(s, transactions) })).filter(s => s.due).sort((a,b) => a.due.localeCompare(b.due));
+  const forecast = useMemo(() => cashFlow.projectCashFlow(data, {asOf:now,days:forecastDays}), [data,now,forecastDays]);
+  const selectedAccount = accounts.find(a=>a.id===forecastAccountId) || accounts.find(a=>a.kind!=='Credit Card') || accounts[0];
+  const selectedForecast = selectedAccount ? forecast.accounts[selectedAccount.id] : null;
+  const cardWithoutLimit = selectedAccount?.kind==='Credit Card' && !selectedAccount.creditLimitCents;
+  const upcomingEvents = forecast.events.filter(e=>e.source==='planned').sort((a,b)=>a.due.localeCompare(b.due));
+  const monthEvents = useMemo(()=>cashFlow.calendarItems(data,calendarMonth),[data,calendarMonth]);
+  const chosenDayEvents = monthEvents.filter(e=>e.date===selectedCalendarDay);
+  const forecastWarnings = accounts.filter(a=>forecast.accounts[a.id]?.firstShortfall);
   const accountName = id => accounts.find(a => a.id === id)?.name || 'Deleted account';
   const searchResults = filteredTransactions(recentSort(transactions), { type: filter, query: searchQuery, start: searchStart, end: searchEnd, accountId: searchAccount, category: searchCategory, minAmount:searchMin, maxAmount:searchMax }, accounts);
   const activityGroups = groupActivity(searchResults);
   const searchCategories = [...new Set([...categories.map(c=>c.name), ...incomeCategories.map(c=>c.name), ...transactions.map(t=>t.category)])].filter(Boolean);
-  const insightSeries = spendingSeries(transactions, ...range);
-  const topTransaction = [...transactions].filter(t => t.type === 'expense' && t.date >= range[0] && t.date <= range[1]).sort((a,b)=>b.amountCents-a.amountCents)[0];
+  const insightSeries = spendingSeries(actualToDate, ...range);
+  const topTransaction = [...actualToDate].filter(t => t.type === 'expense' && t.date >= range[0] && t.date <= range[1]).sort((a,b)=>b.amountCents-a.amountCents)[0];
   const expenseChange = prevTotals.expenses ? Math.round((totals.expenses - prevTotals.expenses) / prevTotals.expenses * 100) : null;
   const recent = recentSort(transactions);
   const series = useMemo(() => Array.from({ length: 6 }, (_, i) => {
     const marker = monthOffset(`${now.slice(0,7)}-01`, i - 5);
     const [start, end] = getPeriod(marker, 'month');
-    return { key: marker, label: parseDate(marker).toLocaleDateString('en-AU', { month: 'short' }), value: periodTotals(transactions, start, end).expenses, highlight: i === 5 };
-  }), [transactions, now]);
+    return { key: marker, label: parseDate(marker).toLocaleDateString('en-AU', { month: 'short' }), value: periodTotals(actualToDate, start, end).expenses, highlight: i === 5 };
+  }), [actualToDate, now]);
 
   function openTransaction(t = null, preset = null) {
     setModal('transaction'); setEditingId(t?.id || null); setError('');
@@ -678,7 +734,7 @@ export default function App() {
   }
   function openAccount(a = null) {
     setModal('account'); setEditingId(a?.id || null); setError('');
-    setDraft(a ? { ...a, opening: (a.openingCents / 100).toFixed(2), creditLimit: ((a.creditLimitCents || 0) / 100).toFixed(2) } : { name: '', kind: 'Bank', opening: '0.00', creditLimit: '0.00', color: ACCOUNT_COLORS[accounts.length % ACCOUNT_COLORS.length] });
+    setDraft(a ? { ...a, opening: (a.openingCents / 100).toFixed(2), creditLimit: ((a.creditLimitCents || 0) / 100).toFixed(2), buffer: ((a.minBufferCents || 0) / 100).toFixed(2) } : { name: '', kind: 'Bank', opening: '0.00', creditLimit: '0.00', buffer: '0.00', color: ACCOUNT_COLORS[accounts.length % ACCOUNT_COLORS.length] });
   }
   function goToSettings(page = 'menu') { setSettingsPage(page); setTab('settings'); }
   function openCategory(c = null, kind = settingsPage === 'income' ? 'income' : 'expense') {
@@ -710,7 +766,10 @@ export default function App() {
     const tx = { id: editingId || uid(), type: draft.type, date: draft.date, time: parseTime(draft.time) || null,
       amountCents: cents, category: draft.type === 'transfer' ? 'Transfer' : draft.category,
       description: String(draft.description || '').trim() || (draft.type === 'transfer' ? 'Transfer' : draft.category),
-      accountId: draft.accountId, toAccountId: draft.type === 'transfer' ? draft.toAccountId : null };
+      accountId: draft.accountId, toAccountId: draft.type === 'transfer' ? draft.toAccountId : null,
+      ...(editingId && transactions.find(t=>t.id===editingId)?.scheduleId ? {
+        scheduleId:transactions.find(t=>t.id===editingId).scheduleId,
+        scheduledFor:transactions.find(t=>t.id===editingId).scheduledFor} : {}) };
     update(d => ({ ...d, transactions: editingId ? d.transactions.map(t => t.id === editingId ? tx : t) : [...d.transactions, tx] }));
     closeModal();
   }
@@ -729,7 +788,11 @@ export default function App() {
     if (draft.kind === 'Credit Card' && !/^\d+(?:\.\d{1,2})?$/.test(rawLimit)) return setError('Use a valid credit limit.');
     const creditLimitCents = draft.kind === 'Credit Card' ? Math.round(Number(rawLimit) * 100) : 0;
     if (!Number.isSafeInteger(creditLimitCents)) return setError('Credit limit is too large.');
-    const account = { id: editingId || uid(), name, kind: draft.kind, openingCents: cents, creditLimitCents, color: draft.color };
+    const rawBuffer = String(draft.buffer || '0').trim().replace(/[$,\s]/g, '');
+    if (!/^\d+(?:\.\d{1,2})?$/.test(rawBuffer)) return setError('Use a valid minimum balance buffer.');
+    const minBufferCents = Math.round(Number(rawBuffer) * 100);
+    if (!Number.isSafeInteger(minBufferCents)) return setError('Minimum buffer is too large.');
+    const account = { id: editingId || uid(), name, kind: draft.kind, openingCents: cents, creditLimitCents, minBufferCents, color: draft.color };
     update(d => ({ ...d, accounts: editingId ? d.accounts.map(a => a.id === editingId ? account : a) : [...d.accounts, account] }));
     closeModal();
   }
@@ -785,24 +848,39 @@ export default function App() {
       Alert.alert('Account in use', 'Delete or move its transactions and scheduled expenses first.'); return;
     }
     Alert.alert('Delete this item?', 'This cannot be undone.', [
-      { text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: () => { update(d => ({ ...d, [field]: d[field].filter(item => item.id !== id) })); if (modal === 'transaction' || modal === 'schedule') closeModal(); } },
+      { text: 'Cancel', style: 'cancel' }, { text: 'Delete', style: 'destructive', onPress: () => { update(d => {
+          if(type !== 'transaction') return { ...d, [field]:d[field].filter(item=>item.id!==id) };
+          const deleted=d.transactions.find(t=>t.id===id);
+          const remaining=d.transactions.filter(t=>t.id!==id);
+          return {...d,transactions:remaining,schedules:d.schedules.map(sc=>
+            deleted?.scheduleId===sc.id && sc.repeat==='None' && !remaining.some(t=>t.scheduleId===sc.id)
+              ? {...sc,completed:false}:sc)};
+        }); if (modal === 'transaction' || modal === 'schedule') closeModal(); } },
     ]);
   }
   function recordPayment(s) {
     Alert.alert('Record payment?', `${s.name}: ${money(s.amountCents)}. This will add ${s.kind === 'card_payment' ? 'an internal transfer (not an expense)' : s.kind === 'income' ? 'income' : 'an expense'} dated today and advance the schedule.`, [
-      { text: 'Cancel', style: 'cancel' }, { text: 'Record', onPress: () => update(d => applyRecordedPayment(d, s, today())) },
+      { text: 'Cancel', style: 'cancel' }, { text: 'Record', onPress: () => update(d => cashFlow.confirmScheduledPayment(d,{scheduleId:s.id,scheduledFor:s.due || s.startDate,recordedOn:today(),time:timeNow(),id:uid()})) },
     ]);
   }
-  function postThisMonth() {
-    const monthStart = `${today().slice(0,7)}-01`;
-    const pending = schedules.flatMap(s=>pendingOccurrencesInMonth(s,monthStart));
-    const remaining = pending.length;
-    if (!remaining) return Alert.alert('Nothing to post', 'All this month’s eligible planned expenses have already been recorded, or there are none.');
-    Alert.alert('Record this month’s planned expenses?',
-      `${remaining} planned expense occurrence(s) will be recorded now, each dated on its own scheduled day in ${monthStart.slice(0, 7)}. Future-dated entries will appear under their due dates in Activity and affect projected balances.`, [
+  function recordForecastEvent(event) {
+    if(event.source !== 'planned') return;
+    const plan = schedules.find(s => s.id === event.scheduleId);
+    if(!plan) return Alert.alert('Plan unavailable', 'This planned entry may have been removed.');
+    Alert.alert('Record as paid today?', `${plan.name} (${money(event.amountCents)}) was scheduled for ${event.scheduledFor}. This creates an actual ${event.type === 'transfer' ? 'credit-card repayment' : event.type} dated today, not a forecast.`, [
       {text:'Cancel',style:'cancel'},
-      {text:'Record expenses',onPress:()=>update(d=>postPlannedMonth(d,monthStart))},
+      {text:'Edit plan',onPress:()=>openSchedule(plan)},
+      {text:'Record paid',onPress:()=>update(d=>cashFlow.confirmScheduledPayment(d,{
+        scheduleId:event.scheduleId,scheduledFor:event.scheduledFor,recordedOn:today(),time:timeNow(),id:uid(),
+      }))},
     ]);
+  }
+  function openForecastItem(event) {
+    if (event.source==='planned') return recordForecastEvent(event);
+    if (event.source==='recorded') {
+      const actual=transactions.find(t=>t.id===event.id.replace('confirmed:',''));
+      if(actual)openTransaction(actual);
+    }
   }
   function resetAll() {
     Alert.alert('Clear all records?', 'This removes the accounts, transactions and planned payments from this device. The new empty ledger will also be saved to iCloud automatically; prior snapshots may remain in iCloud. This cannot be undone in the app.', [
@@ -837,12 +915,12 @@ export default function App() {
       {savedError ? <Text style={styles.errorBanner}>{savedError}</Text> : null}
       {data.mode === 'demo' ? <View style={styles.demoBanner}><Text style={styles.demoText}>Fictional demo data. Erase it in Accounts before tracking your own finances.</Text></View> : null}
       {tab === 'home' && <>
-        <View style={styles.hero}><Text style={styles.heroSmall}>NET WORTH (ASSETS LESS CARD DEBT)</Text><Text style={styles.heroBig} adjustsFontSizeToFit numberOfLines={1}>{money(balance)}</Text><Text style={styles.heroHint}>{accounts.length} {accounts.length === 1 ? 'account' : 'accounts'} · credit card debt: {money(creditDebt)}</Text>
-          <View style={styles.heroDivider}/><View style={styles.metricsRow}><Metric label="This month in" value={money(periodTotals(transactions, ...getPeriod(now, 'month')).income)} color="#9AE6C6"/><Metric label="This month out" value={money(periodTotals(transactions, ...getPeriod(now, 'month')).expenses)} color="#FFBAC8"/></View>
+        <View style={styles.hero}><Text style={styles.heroSmall}>RECORDED NET WORTH · AS OF TODAY</Text><Text style={styles.heroBig} adjustsFontSizeToFit numberOfLines={1}>{money(balance)}</Text><Text style={styles.heroHint}>{accounts.length} {accounts.length === 1 ? 'account' : 'accounts'} · credit card debt: {money(creditDebt)}</Text>
+          <View style={styles.heroDivider}/><View style={styles.metricsRow}><Metric label="This month in" value={money(periodTotals(actualToDate, ...getPeriod(now, 'month')).income)} color="#9AE6C6"/><Metric label="This month out" value={money(periodTotals(actualToDate, ...getPeriod(now, 'month')).expenses)} color="#FFBAC8"/></View>
         </View>
         <View style={styles.quickRow}><Button title="+ Add transaction" onPress={() => accounts.length ? openTransaction() : openAccount()} /><Button title="+ Add account" secondary onPress={() => openAccount()}/></View>
         <View style={styles.card}><SectionTitle side={<Text style={styles.smallLink} onPress={() => setTab('analytics')}>View insights ›</Text>}>Spending trend</SectionTitle><Chart series={series}/></View>
-        <View style={styles.card}><SectionTitle side={<Text style={styles.smallLink} onPress={() => setTab('schedule')}>View planned ›</Text>}>Upcoming payments</SectionTitle>
+        <View style={styles.card}><SectionTitle side={<Text style={styles.smallLink} onPress={() => {setPlannedSection('forecast');setTab('schedule');}}>See forecast ›</Text>}>Upcoming payments</SectionTitle>
           {!scheduled.length ? <EmptyMessage title="Nothing planned" detail="Add a recurring or one-off expense." /> : scheduled.slice(0,3).map(s => <View key={s.id} style={styles.miniRow}><View style={{ flex: 1 }}><Text style={styles.rowTitle}>{s.name}</Text><Text style={styles.rowSubtitle}>{s.due} · {s.repeat}</Text></View><Text style={styles.rowAmount}>{money(s.amountCents)}</Text></View>)}
         </View>
         <View style={styles.card}><SectionTitle side={<Text style={styles.smallLink} onPress={() => setTab('transactions')}>All activity ›</Text>}>Recent transactions</SectionTitle>{!recent.length ? <EmptyMessage title="No transactions yet" detail="Record your first expense or income."/> : recent.slice(0,4).map(t => <TxRow key={t.id} t={t} icon={categoryIcon(t)} accountName={accountName(t.accountId)} destinationName={accountName(t.toAccountId)} onEdit={() => openTransaction(t)}/>)}</View>
@@ -876,16 +954,91 @@ export default function App() {
         </View>
       </>}
       {tab === 'schedule' && <>
-        <View style={styles.toolbar}><Text style={[styles.subtle, { flex: 1 }]}>See upcoming payments, income and repayments. Tap an entry to edit.</Text><Button title="Manage" small onPress={()=>goToSettings('planned')}/></View>
-        <View style={styles.filterRow}>{[['all','All'],['expense','Expenses'],['income','Income'],['card_payment','Card repayments']].map(([k,label])=><Pill compact key={k} title={label} active={plannedView===k} onPress={()=>setPlannedView(k)}/>)}</View>
-        <View style={styles.card}><SectionTitle>Upcoming and overdue</SectionTitle>
-          {!scheduled.filter(s=>plannedView==='all'||(s.kind||'expense')===plannedView).length ? <EmptyMessage title="No planned entries" detail="Add income, expenses or a card repayment plan." /> : scheduled.filter(s=>plannedView==='all'||(s.kind||'expense')===plannedView).map(s =>
-            <Pressable key={s.id} accessibilityRole="button" accessibilityLabel={`Edit planned ${s.name}`} onPress={()=>openSchedule(s)} style={styles.scheduleRow}>
-              <View style={styles.txIcon}><Text style={{fontSize:18}}>{categoryIcon({type:s.kind==='card_payment'?'transfer':s.kind||'expense',category:s.category})}</Text></View>
-              <View style={{flex:1,minWidth:0}}><Text style={styles.rowTitle} numberOfLines={1}>{s.name}</Text><Text style={[styles.rowSubtitle,s.due<now&&{color:C.red}]} numberOfLines={2}>{s.due < now ? 'Overdue · ' : ''}{s.due} · {s.repeat} · {accountName(s.accountId)}</Text></View>
-              <Text style={[styles.rowAmount,{color:s.kind==='income'?C.green:s.kind==='card_payment'?C.mute:C.red}]}>{s.kind==='income'?'+':s.kind==='card_payment'?'':'−'}{money(s.amountCents)}</Text>
-            </Pressable>)}
+        <View style={styles.toolbar}><Text style={[styles.subtle,{flex:1}]}>Forecasts are estimates. Unpaid plans never change your recorded balance.</Text><Button title="Manage plans" small onPress={()=>goToSettings('planned')}/></View>
+        <View style={styles.filterRow}>
+          {[['forecast','Forecast'],['upcoming','Upcoming'],['calendar','Calendar']].map(([k,label])=><Pill key={k} title={label} active={plannedSection===k} onPress={()=>setPlannedSection(k)}/>)}
         </View>
+        {plannedSection==='forecast' && <>
+          <View style={styles.card}>
+            <SectionTitle>Account cash-flow forecast</SectionTitle>
+            {!accounts.length?<EmptyMessage title="No accounts" detail="Create an account to forecast your cash flow."/>:<>
+              <Text style={styles.fieldLabel}>Account</Text>
+              <ScrollView horizontal contentContainerStyle={{gap:6}} showsHorizontalScrollIndicator={false}>{accounts.map(a=><Pill key={a.id} compact title={a.name} active={selectedAccount?.id===a.id} onPress={()=>setForecastAccountId(a.id)}/>)}</ScrollView>
+              <View style={styles.filterRow}>{[7,14,30,60,90].map(d=><Pill key={d} compact title={`${d} days`} active={forecastDays===d} onPress={()=>setForecastDays(d)}/>)}</View>
+              {selectedAccount && selectedForecast ? <>
+                <View style={styles.metricsRow}>
+                  <Metric label={cardWithoutLimit?'Card debt now':selectedAccount.kind==='Credit Card'?'Available credit now':'Recorded balance now'} value={money(selectedForecast.start)} />
+                  <Metric label={cardWithoutLimit?'Projected debt at end':'Lowest projected'} value={money(cardWithoutLimit?selectedForecast.end:selectedForecast.lowest)} color={!cardWithoutLimit&&selectedForecast.lowest<selectedForecast.buffer?C.red:C.ink}/>
+                </View>
+                <View style={styles.metricsRow}>
+                  <Metric label="Projected at end" value={money(selectedForecast.end)}/>
+                  <Metric label={selectedAccount.kind==='Credit Card'?'Headroom':'Safe to spend*'} value={selectedAccount.kind==='Credit Card'?(selectedForecast.availableCredit==null?'Set credit limit':money(Math.max(0,selectedForecast.lowest-selectedForecast.buffer))):money(selectedForecast.safeToSpend)} color={C.blue}/>
+                </View>
+                <ForecastBalanceChart daily={forecast.daily} account={selectedAccount} buffer={selectedForecast.buffer} onSelect={(date,value)=>Alert.alert(date,`Projected ${selectedAccount.kind==='Credit Card'?'available credit':'balance'}: ${money(value)}`)}/>
+                {cardWithoutLimit?<Text style={styles.helper}>Credit-limit alerts are unavailable until you set a card limit in Settings → Accounts.</Text>:selectedForecast.firstShortfall?<View style={styles.forecastWarning}>
+                  <Text style={styles.warningTitle}>⚠ Potential shortfall on {selectedForecast.firstShortfall}</Text>
+                  <Text style={styles.summary}>May fall {money(selectedForecast.firstShortfallAmount)} below your {money(selectedForecast.buffer)} buffer in {selectedAccount.name}. Review upcoming payments or transfer funds.</Text>
+                </View>:<Text style={styles.subtle}>No shortfall against your buffer is forecast for this account within {forecastDays} days.</Text>}
+                
+                {selectedAccount.kind!=='Credit Card'&&<Text style={styles.helper}>*Safe to spend is the lowest forecast balance minus your buffer. It assumes all listed income arrives and all planned payments occur, and excludes unplanned spending.</Text>}
+              </>:null}
+            </>}
+          </View>
+          {forecastWarnings.length>0?<View style={styles.card}><SectionTitle>Accounts needing attention</SectionTitle>
+            {forecastWarnings.map(a=><Pressable accessibilityRole="button" onPress={()=>setForecastAccountId(a.id)} key={a.id} style={styles.miniRow}>
+              <View style={{flex:1}}><Text style={styles.rowTitle}>{a.name}</Text><Text style={styles.rowSubtitle}>Potential shortfall: {forecast.accounts[a.id].firstShortfall}</Text></View>
+              <Text style={[styles.rowAmount,{color:C.red}]}>{money(forecast.accounts[a.id].firstShortfallAmount)}</Text>
+            </Pressable>)}
+          </View>:null}
+          <View style={styles.card}><SectionTitle>Upcoming money movements</SectionTitle>
+            {!upcomingEvents.length?<EmptyMessage title="Nothing upcoming" detail="Add planned expenses or income from Settings."/>:
+              upcomingEvents.slice(0,10).map(event=><PlannedEventRow key={event.id} event={event} account={id=>accounts.find(a=>a.id===id)} accountName={accountName} onPress={()=>openForecastItem(event)}/>) }
+            {upcomingEvents.length>10?<Text style={styles.smallLink} onPress={()=>setPlannedSection('upcoming')}>See all upcoming payments ›</Text>:null}
+          </View>
+          <Text style={styles.helper}>Projections include future-dated actual entries and unconfirmed planned expenses, income and card repayments. Amounts are not bank-verified. Same-day payments are conservatively applied before income.</Text>
+        </>}
+        {plannedSection==='upcoming'&&<>          <View style={styles.filterRow}>{[['all','All'],['expense','Expenses'],['income','Income'],['card_payment','Card repayments']].map(([k,label])=><Pill compact key={k} title={label} active={plannedView===k} onPress={()=>setPlannedView(k)}/>)}</View>
+          <View style={styles.card}><SectionTitle>Next {forecastDays} days</SectionTitle>
+            <Text style={styles.helper}>Tap an entry to mark it paid today or edit the plan. Recorded payments move to Activity; pending ones remain forecasts.</Text>
+            {!upcomingEvents.filter(e=>plannedView==='all'||(plannedView==='card_payment'?e.type==='transfer':e.type===plannedView)).length?
+              <EmptyMessage title="No pending payments" detail="Try a different filter or create a plan."/>:
+              upcomingEvents.filter(e=>plannedView==='all'||(plannedView==='card_payment'?e.type==='transfer':e.type===plannedView)).map(e=><PlannedEventRow key={e.id} event={e} account={id=>accounts.find(a=>a.id===id)} accountName={accountName} onPress={()=>openForecastItem(e)}/>) }
+          </View>
+          <Text style={styles.helper}>Showing overdue obligations and the next {forecastDays} days. Change the forecast horizon to extend this list.</Text>
+        </>}
+        {plannedSection==='calendar'&&<>
+          <View style={styles.card}>
+            <View style={styles.between}>
+              <Text style={styles.smallLink} onPress={()=>{const m=cashFlow.addMonths(calendarMonth,-1);setCalendarMonth(m);setSelectedCalendarDay(m);}}>‹ Previous</Text>
+              <Text style={styles.sectionText}>{parseDate(calendarMonth)?.toLocaleDateString('en-AU',{month:'long',year:'numeric'})}</Text>
+              <Text style={styles.smallLink} onPress={()=>{const m=cashFlow.addMonths(calendarMonth,1);setCalendarMonth(m);setSelectedCalendarDay(m);}}>Next ›</Text>
+            </View>
+            <View style={styles.calendarGrid}>{['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d=><Text key={d} style={styles.calendarWeekday}>{d}</Text>)}</View>
+            <View style={styles.calendarGrid}>
+              {Array.from({length:(parseDate(calendarMonth).getDay()+6)%7},(_,i)=><View key={`empty-${i}`} style={styles.calendarCell}/>)}
+              {Array.from({length:Number(cashFlow.plusDays(cashFlow.addMonths(calendarMonth,1),-1).slice(8))},(_,i)=>{
+                const day=`${calendarMonth.slice(0,8)}${String(i+1).padStart(2,'0')}`;
+                const items=monthEvents.filter(e=>e.date===day);
+                return <Pressable key={day} accessibilityRole="button" accessibilityLabel={`${day}, ${items.length} planned or recorded payment(s)`}
+                  onPress={()=>setSelectedCalendarDay(day)} style={[styles.calendarCell,day===selectedCalendarDay&&styles.selectedCalendarCell]}>
+                  <Text style={[styles.calendarNumber,day===selectedCalendarDay&&{color:'#fff'}]}>{i+1}</Text>
+                  {items.length>0&&<Text style={[styles.calendarDots,day===selectedCalendarDay&&{color:'#fff'}]}>{items.some(e=>e.type==='expense')?'●':''}{items.some(e=>e.type==='income')?'●':''}{items.some(e=>e.type==='transfer')?'●':''}</Text>}
+                </Pressable>;
+              })}
+            </View>
+            <Text style={styles.helper}>Tap a day to see its planned expenses, income and repayments. Recorded plan payments are included.</Text>
+          </View>
+          <View style={styles.card}><SectionTitle>{selectedCalendarDay}</SectionTitle>
+            {chosenDayEvents.length===0?<EmptyMessage title="No payments" detail="No scheduled items for this day."/>:
+              <>
+                <View style={styles.metricsRow}>
+                  <Metric label="Planned in" color={C.green} value={money(chosenDayEvents.filter(e=>e.type==='income'&&e.source==='planned').reduce((n,e)=>n+e.amountCents,0))}/>
+                  <Metric label="Planned out" color={C.red} value={money(chosenDayEvents.filter(e=>e.type==='expense'&&e.source==='planned').reduce((n,e)=>n+e.amountCents,0))}/>
+                </View>
+                {chosenDayEvents.map(event=><PlannedEventRow key={event.id} event={event} account={id=>accounts.find(a=>a.id===id)} accountName={accountName} onPress={()=>openForecastItem(event)}/>) }
+              </>}
+          </View>
+        </>}
       </>}
       {tab === 'analytics' && <>
         <View style={styles.filterRow}>
@@ -913,9 +1066,9 @@ export default function App() {
         </View>
       </>}
       {tab === 'accounts' && <>
-        <View style={styles.toolbar}><Text style={[styles.subtle,{flex:1}]}>Asset balances less credit card amounts owed = net worth.</Text><Button title="Manage" small onPress={()=>goToSettings('accounts')}/></View>
+        <View style={styles.toolbar}><Text style={[styles.subtle,{flex:1}]}>Recorded balances exclude transactions dated in the future. Forecasts are shown under Planned.</Text><Button title="Manage" small onPress={()=>goToSettings('accounts')}/></View>
         {!accounts.length ? <View style={styles.card}><EmptyMessage title="Add your first account" detail="Start with a bank, savings, cash or credit card account."/></View> : accounts.map(a => {
-          const current = accountBalance(a, transactions);
+          const current = accountBalance(a, actualToDate);
           const card = a.kind === 'Credit Card';
           const remainingCredit = (a.creditLimitCents || 0) - current;
           return <View style={styles.accountCard} key={a.id}>
@@ -934,36 +1087,30 @@ export default function App() {
       </>}
       {tab === 'settings' && <>
         {settingsPage === 'menu' && <View style={styles.card}>
-          <Text style={styles.subtle}>Choose what you'd like to adjust. Each item opens its own settings screen.</Text>
-          <SettingsMenuRow icon="📅" title="Planned expenses & income" detail={`${schedules.length} plans · monthly posting options`} onPress={()=>setSettingsPage('planned')}/>
-          <SettingsMenuRow icon="🛒" title="Spending categories" detail={`${categories.length} categories · names and icons`} onPress={()=>setSettingsPage('expenses')}/>
-          <SettingsMenuRow icon="💼" title="Income categories" detail={`${incomeCategories.length} categories · names and icons`} onPress={()=>setSettingsPage('income')}/>
+          <Text style={styles.subtle}>Choose what you'd like to change. Each item opens its own settings screen.</Text>
+          <SettingsMenuRow icon="📅" title="Planned expenses & income" detail={`${schedules.length} plans · recurrence and payment details`} onPress={()=>setSettingsPage('planned')}/>
+          <SettingsMenuRow icon="🛒" title="Spending categories" detail={`${categories.length} categories · edit names and icons`} onPress={()=>setSettingsPage('expenses')}/>
+          <SettingsMenuRow icon="💼" title="Income categories" detail={`${incomeCategories.length} categories · edit names and icons`} onPress={()=>setSettingsPage('income')}/>
           <SettingsMenuRow icon="🏦" title="Accounts" detail={`${accounts.length} accounts · add, edit or remove`} onPress={()=>setSettingsPage('accounts')}/>
           <SettingsMenuRow icon="☁️" title="Automatic iCloud backup" detail="Backup status and recovery information" onPress={()=>setSettingsPage('backup')}/>
           <SettingsMenuRow icon="🔒" title="Privacy & data" detail="Data storage and clear-all controls" onPress={()=>setSettingsPage('privacy')}/>
         </View>}
         {settingsPage === 'planned' && <>
           <View style={styles.card}>
-            <SectionTitle>Record planned expenses in advance</SectionTitle>
-            <Text style={styles.subtle}>Pre-record expenses due this month, keeping every transaction on its original scheduled date. Income and credit-card repayments are not automatically recorded.</Text>
-            <Pressable accessibilityRole="switch" accessibilityState={{checked:!!data.autoPostPlannedExpenses}}
-              onPress={()=>update(d=>({...d,autoPostPlannedExpenses:!d.autoPostPlannedExpenses}))} style={styles.between}>
-              <Text style={[styles.rowTitle,{flex:1}]}>Automatically record at month start</Text>
-              <Text style={[styles.toggleBadge,{backgroundColor:data.autoPostPlannedExpenses?C.green:'#DCE1EB'}]}>{data.autoPostPlannedExpenses?'ON':'OFF'}</Text>
-            </Pressable>
-            <Text style={styles.helper}>When enabled, the app records the month's remaining planned expenses when opened (even after the 1st), preserving their due dates. It does not run while iOS fully suspends the app.</Text>
-            <Button title="Record this month's planned expenses now" secondary small onPress={postThisMonth}/>
+            <SectionTitle>How planned payments work</SectionTitle>
+            <Text style={styles.summary}>Planned expenses and income stay forecasts until you confirm them. They do not reduce the actual balance or count as historical spending.</Text>
+            <Text style={styles.helper}>Open Planned → Forecast to check your predicted balances, Upcoming to record payments, or Calendar to see their due dates. Automatic first-of-month posting is disabled.</Text>
           </View>
           <View style={styles.card}>
             <SectionTitle side={<Button title="+ New plan" small onPress={()=>accounts.length ? openSchedule() : openAccount()}/>}>Manage planned entries</SectionTitle>
-            <Text style={styles.subtle}>Tap a plan to adjust its amount, due date, recurrence, category or account, or delete it in the editor.</Text>
-            {!schedules.length ? <EmptyMessage title="No plans yet" detail="Add planned expenses, income or credit-card repayments."/> :
-              [...schedules].sort((a,b)=>a.startDate.localeCompare(b.startDate)).map(s=>
+            <Text style={styles.subtle}>Tap a plan to edit its amount, date, recurrence, category or account. You can also delete it in the editor.</Text>
+            {!schedules.length ? <EmptyMessage title="No plans yet" detail="Add a planned expense, income or credit-card repayment."/>
+              : [...schedules].sort((a,b)=>a.startDate.localeCompare(b.startDate)).map(s=>
                 <Pressable key={s.id} accessibilityRole="button" accessibilityLabel={`Edit planned ${s.name}`} onPress={()=>openSchedule(s)} style={styles.scheduleRow}>
                   <View style={styles.txIcon}><Text style={{fontSize:18}}>{categoryIcon({type:s.kind==='card_payment'?'transfer':s.kind||'expense',category:s.category})}</Text></View>
                   <View style={{flex:1,minWidth:0}}>
                     <Text style={styles.rowTitle} numberOfLines={1}>{s.name}</Text>
-                    <Text style={styles.rowSubtitle} numberOfLines={2}>{s.completed ? 'Completed' : (dueDate(s,now) || s.startDate)} · {s.repeat} · {accountName(s.accountId)}</Text>
+                    <Text style={styles.rowSubtitle} numberOfLines={2}>{s.completed ? 'Completed' : (cashFlow.nextPendingDue(s, transactions) || s.startDate)} · {s.repeat} · {accountName(s.accountId)}</Text>
                   </View>
                   <Text style={styles.settingsChevron}>›</Text>
                 </Pressable>)}
@@ -971,7 +1118,7 @@ export default function App() {
         </>}
         {settingsPage === 'expenses' && <View style={styles.card}>
           <SectionTitle side={<Button title="+ Add" small onPress={()=>openCategory(null,'expense')}/>}>Spending categories</SectionTitle>
-          <Text style={styles.subtle}>Tap to rename or choose an icon. Changes update matching expenses and planned payments.</Text>
+          <Text style={styles.subtle}>Tap a category to change its name or icon. Changes update existing expense transactions and planned payments.</Text>
           {categories.map(c=><Pressable key={c.name} accessibilityRole="button" onPress={()=>openCategory(c,'expense')} style={styles.miniRow}>
             <Text style={styles.categoryEmoji}>{c.icon || CATEGORY_ICONS[c.name] || '📦'}</Text>
             <Text style={[styles.rowTitle,{flex:1}]}>{c.name}</Text>
@@ -980,7 +1127,7 @@ export default function App() {
         </View>}
         {settingsPage === 'income' && <View style={styles.card}>
           <SectionTitle side={<Button title="+ Add" small onPress={()=>openCategory(null,'income')}/>}>Income categories</SectionTitle>
-          <Text style={styles.subtle}>Tap to rename or choose an icon. Changes update matching income and planned income.</Text>
+          <Text style={styles.subtle}>Tap a category to change its name or icon. Changes update existing income transactions and planned income.</Text>
           {incomeCategories.map(c=><Pressable key={c.name} accessibilityRole="button" onPress={()=>openCategory(c,'income')} style={styles.miniRow}>
             <Text style={styles.categoryEmoji}>{c.icon || CATEGORY_ICONS[c.name] || '💰'}</Text>
             <Text style={[styles.rowTitle,{flex:1}]}>{c.name}</Text>
@@ -989,8 +1136,8 @@ export default function App() {
         </View>}
         {settingsPage === 'accounts' && <View style={styles.card}>
           <SectionTitle side={<Button title="+ Add" small onPress={()=>openAccount()}/>}>Manage accounts</SectionTitle>
-          <Text style={styles.subtle}>Add or edit bank, savings, cash and credit-card accounts. An account in use cannot be deleted.</Text>
-          {!accounts.length ? <EmptyMessage title="No accounts" detail="Add an account to track income and expenses."/> : accounts.map(a=><View key={a.id} style={styles.miniRow}>
+          <Text style={styles.subtle}>Manage bank, savings, cash and credit-card accounts. Set a minimum balance or available-credit buffer to receive forecast shortfall warnings.</Text>
+          {!accounts.length ? <EmptyMessage title="No accounts" detail="Add an account to start tracking transactions."/> : accounts.map(a=><View key={a.id} style={styles.miniRow}>
             <Pressable accessibilityRole="button" accessibilityLabel={`Edit ${a.name} account`} onPress={()=>openAccount(a)} style={{flex:1,flexDirection:'row',gap:12,alignItems:'center'}}>
               <View style={[styles.accountLogo,{width:34,height:34,borderRadius:10,backgroundColor:a.color}]}><Text style={{color:'#fff',fontWeight:'800'}}>{a.name.slice(0,1).toUpperCase()}</Text></View>
               <View style={{flex:1,minWidth:0}}><Text style={styles.rowTitle} numberOfLines={1}>{a.name}</Text><Text style={styles.rowSubtitle}>{a.kind}</Text></View>
@@ -1003,13 +1150,13 @@ export default function App() {
           <SectionTitle>Automatic iCloud backup</SectionTitle>
           <Text style={styles.summary}>{cloudStatus.text}</Text>
           {cloudStatus.at ? <Text style={styles.helper}>Last saved by the app: {new Date(cloudStatus.at).toLocaleString('en-AU')}</Text> : null}
-          <Text style={styles.helper}>Backups occur while the app runs. A new installation attempts to recover the latest valid snapshot if no local ledger exists. This is not live multi-device sync.</Text>
-          <Text style={styles.helper}>Backups are readable JSON in the app's private iCloud container and are not separately password-encrypted. A signed native iOS build is required.</Text>
+          <Text style={styles.helper}>Backups occur while the app is running. On a new installation the latest valid snapshot is recovered if no local ledger exists. This is not live multi-device sync.</Text>
+          <Text style={styles.helper}>Backups are readable JSON inside the app's private iCloud container and are not separately password-encrypted. A signed native iOS build is required.</Text>
         </View>}
         {settingsPage === 'privacy' && <View style={styles.card}>
           <SectionTitle>Privacy and data</SectionTitle>
           <Text style={styles.summary}>Records stay on this device and are backed up automatically when iCloud is available. No bank credentials or external app server are used.</Text>
-          <Text style={styles.helper}>Clearing records removes local financial data and creates a new empty backup. Earlier iCloud snapshots may remain.</Text>
+          <Text style={styles.helper}>Clearing records permanently removes them from this device. Check backup and privacy implications before continuing.</Text>
           <Button title="Clear all records" secondary onPress={resetAll}/>
         </View>}
       </>}
@@ -1035,6 +1182,7 @@ export default function App() {
             <Text style={styles.fieldLabel}>Account type</Text><View style={styles.chips}>{['Bank','Savings','Cash','Credit Card'].map(kind=><Pill key={kind} title={kind} active={draft.kind===kind} onPress={()=>setDraft(x=>({...x,kind}))}/>)}</View>
             <LabeledInput label={draft.kind === 'Credit Card' ? 'Opening debt owed (AUD)' : 'Opening balance (AUD)'} value={draft.opening} onChangeText={opening=>setDraft(x=>({...x,opening}))} keyboardType="decimal-pad" hint={draft.kind === 'Credit Card' ? 'Amount already owed on this credit card before your first recorded transaction. Enter 0 if nothing is owed.' : 'Balance before your first recorded transaction. Use your balance before the first transaction you plan to enter.'} />
             {draft.kind === 'Credit Card' ? <LabeledInput label="Credit limit (AUD)" value={draft.creditLimit} onChangeText={creditLimit=>setDraft(x=>({...x,creditLimit}))} keyboardType="decimal-pad" hint="Optional: use 0 if you do not want to track available credit." /> : null}
+            <LabeledInput label={draft.kind==='Credit Card'?'Minimum available credit (AUD)':'Minimum balance buffer (AUD)'} value={draft.buffer || '0.00'} onChangeText={buffer=>setDraft(x=>({...x,buffer}))} keyboardType="decimal-pad" hint="Forecast warnings appear if this account may fall below the buffer. Set 0 to warn only about a negative balance (or exceeded credit limit)."/>
             <Text style={styles.fieldLabel}>Colour</Text><View style={styles.chips}>{ACCOUNT_COLORS.map(color=><Pressable key={color} onPress={()=>setDraft(x=>({...x,color}))} style={[styles.colorDot,{backgroundColor:color,borderWidth:draft.color===color?4:0,borderColor:'#DAE0EF'}]}/>)}</View>
           </>}
           {modal === 'schedule' && <>
@@ -1108,11 +1256,19 @@ const styles = StyleSheet.create({
   tabBar:{flexDirection:'row',backgroundColor:'#fff',borderTopWidth:1,borderTopColor:C.border,paddingVertical:10,paddingHorizontal:3},tabItem:{flex:1,alignItems:'center',justifyContent:'center',gap:4},tabIcon:{fontSize:23,fontWeight:'800',color:'#A1AAC0'},tabText:{fontSize:10,color:'#8B96AA',fontWeight:'600'},
   modalScreen:{flex:1,backgroundColor:C.pale},modalHeader:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',padding:20,backgroundColor:'#fff',borderBottomWidth:1,borderBottomColor:C.border},modalTitle:{color:C.ink,fontSize:20,fontWeight:'800'},close:{fontSize:14,color:C.blue,fontWeight:'800'},
   fieldLabel:{fontSize:13,fontWeight:'800',color:C.ink},input:{backgroundColor:'#fff',borderColor:'#DDE4EF',borderWidth:1,borderRadius:12,paddingHorizontal:14,paddingVertical:13,fontSize:16,color:C.ink},helper:{fontSize:11,color:C.mute,lineHeight:17},chips:{flexDirection:'row',flexWrap:'wrap',gap:7},colorDot:{width:35,height:35,borderRadius:18},
-  settingsBack:{color:C.blue,fontSize:13,fontWeight:'800',marginBottom:2},
-  settingsMenuRow:{flexDirection:'row',alignItems:'center',gap:12,paddingVertical:14,borderTopWidth:1,borderTopColor:C.border},
-  settingsMenuIcon:{width:42,height:42,borderRadius:13,backgroundColor:'#F1F4FA',alignItems:'center',justifyContent:'center'},
-  settingsMenuTitle:{fontSize:14,fontWeight:'800',color:C.ink},settingsMenuDetail:{fontSize:11,color:C.mute,marginTop:3,lineHeight:16},
-  settingsChevron:{color:C.mute,fontSize:24,fontWeight:'600'},
-  categoryEmoji:{fontSize:22,width:36,marginRight:7,textAlign:'center'},iconPicker:{flexDirection:'row',flexWrap:'wrap',gap:8},iconChoice:{width:45,height:45,borderRadius:12,backgroundColor:'#F2F4FA',justifyContent:'center',alignItems:'center',borderWidth:1,borderColor:'#E2E6EF'},iconChoiceSelected:{borderColor:C.blue,borderWidth:2,backgroundColor:'#E4E9FE'},toggleBadge:{color:'#fff',fontSize:11,fontWeight:'800',paddingHorizontal:12,paddingVertical:7,borderRadius:9,overflow:'hidden'},
+   settingsBack:{color:C.blue,fontSize:13,fontWeight:'800',marginBottom:2},
+   settingsMenuRow:{flexDirection:'row',alignItems:'center',gap:12,paddingVertical:14,borderTopWidth:1,borderTopColor:C.border},
+   settingsMenuIcon:{width:42,height:42,borderRadius:13,backgroundColor:'#F1F4FA',alignItems:'center',justifyContent:'center'},
+   settingsMenuTitle:{fontSize:14,fontWeight:'800',color:C.ink},settingsMenuDetail:{fontSize:11,color:C.mute,marginTop:3,lineHeight:16},
+   settingsChevron:{color:C.mute,fontSize:24,fontWeight:'600'},
+   categoryEmoji:{fontSize:22,width:36,marginRight:7,textAlign:'center'},iconPicker:{flexDirection:'row',flexWrap:'wrap',gap:8},iconChoice:{width:45,height:45,borderRadius:12,backgroundColor:'#F2F4FA',justifyContent:'center',alignItems:'center',borderWidth:1,borderColor:'#E2E6EF'},iconChoiceSelected:{borderColor:C.blue,borderWidth:2,backgroundColor:'#E4E9FE'},toggleBadge:{color:'#fff',fontSize:11,fontWeight:'800',paddingHorizontal:12,paddingVertical:7,borderRadius:9,overflow:'hidden'},
+  forecastWarning:{padding:12,borderWidth:1,borderColor:'#F7CDD4',backgroundColor:'#FFF1F3',borderRadius:12,gap:5},
+  warningTitle:{color:'#A52E45',fontSize:14,fontWeight:'800'},
+  calendarGrid:{flexDirection:'row',flexWrap:'wrap',width:'100%'},
+  calendarWeekday:{width:'14.2857%',textAlign:'center',fontSize:10,fontWeight:'800',color:C.mute,paddingVertical:5},
+  calendarCell:{width:'14.2857%',height:55,justifyContent:'center',alignItems:'center',borderColor:C.border,borderWidth:.5},
+  selectedCalendarCell:{backgroundColor:C.blue,borderRadius:9},
+  calendarNumber:{color:C.ink,fontSize:13,fontWeight:'700'},
+  calendarDots:{color:C.red,fontSize:9,letterSpacing:2},
   errorBanner:{color:'#9A2D46',backgroundColor:'#FFE7ED',padding:12,borderRadius:9,fontSize:12},demoBanner:{backgroundColor:'#FFF5DF',borderRadius:12,padding:11},demoText:{color:'#9B6D25',fontSize:11,lineHeight:17},
 });
