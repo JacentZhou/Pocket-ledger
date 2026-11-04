@@ -269,8 +269,9 @@ function pendingOccurrencesInMonth(schedule, monthStart) {
   return result;
 }
 function postPlannedMonth(data, monthStart) {
-  // Explicitly posting future expenses on day 1 affects that month's spending figures.
-  // Repeat occurrences are individually linked so posting again is idempotent.
+  // Post every planned occurrence for this month in advance, but date the
+  // transaction on its original scheduled day (not on the posting day).
+  // Each occurrence is linked by schedule ID and scheduled date for idempotency.
   if (!parseDate(monthStart) || !monthStart.endsWith('-01')) return data;
   const newTransactions = [];
   const nextSchedules = data.schedules.map(schedule => {
@@ -280,7 +281,7 @@ function postPlannedMonth(data, monthStart) {
       .filter(t => t.scheduleId === schedule.id).map(t => t.scheduledFor));
     const fresh = pending.filter(when => !existingKeys.has(when));
     if (!fresh.length) return schedule;
-    for (const when of fresh) newTransactions.push({ id:uid(), type:'expense', date:monthStart,
+    for (const when of fresh) newTransactions.push({ id:uid(), type:'expense', date:when,
       time:timeNow(), amountCents:schedule.amountCents, category:schedule.category,
       description:schedule.name, accountId:schedule.accountId, toAccountId:null,
       scheduleId:schedule.id, scheduledFor:when });
@@ -779,8 +780,8 @@ export default function App() {
     const pending = schedules.flatMap(s=>pendingOccurrencesInMonth(s,monthStart));
     const remaining = pending.length;
     if (!remaining) return Alert.alert('Nothing to post', 'All this month’s eligible planned expenses have already been recorded, or there are none.');
-    Alert.alert('Record planned expenses on the 1st?',
-      `${remaining} planned expense occurrence(s) will be recorded as spending dated ${monthStart}, even if their real due dates are later this month. This changes your monthly spending totals.`, [
+    Alert.alert('Record this month’s planned expenses?',
+      `${remaining} planned expense occurrence(s) will be recorded now, each dated on its own scheduled day in ${monthStart.slice(0, 7)}. Future-dated entries will appear under their due dates in Activity and affect projected balances.`, [
       {text:'Cancel',style:'cancel'},
       {text:'Record expenses',onPress:()=>update(d=>postPlannedMonth(d,monthStart))},
     ]);
@@ -856,13 +857,13 @@ export default function App() {
         <View style={styles.filterRow}>{[['all','All'],['expense','Expenses'],['income','Income'],['card_payment','Card repayments']].map(([k,label])=><Pill compact key={k} title={label} active={plannedView===k} onPress={()=>setPlannedView(k)}/>)}</View>
         <View style={styles.card}>
           <SectionTitle>Record expenses at month start</SectionTitle>
-          <Text style={styles.subtle}>Optional: post every eligible planned expense for this month as an actual transaction dated on the 1st. Weekly plans can generate multiple entries. Already-recorded occurrences are skipped. Income and credit card repayments are excluded.</Text>
+          <Text style={styles.subtle}>Optional: record all eligible planned expenses for this month in advance, keeping each transaction on its original scheduled date. Weekly plans can create several separately dated entries. Already-recorded occurrences are skipped. Income and card repayments are excluded.</Text>
           <Pressable accessibilityRole="switch" accessibilityState={{checked:!!data.autoPostPlannedExpenses}}
             onPress={()=>update(d=>({...d,autoPostPlannedExpenses:!d.autoPostPlannedExpenses}))} style={styles.between}>
             <Text style={styles.rowTitle}>Automatically record on the 1st</Text>
             <Text style={[styles.toggleBadge,{backgroundColor:data.autoPostPlannedExpenses?C.green:'#DCE1EB'}]}>{data.autoPostPlannedExpenses?'ON':'OFF'}</Text>
           </Pressable>
-          <Text style={styles.helper}>When enabled, the app posts this month's remaining expense occurrences upon opening, even if opened after the 1st. It does not run while iOS has fully suspended the app.</Text>
+          <Text style={styles.helper}>When enabled, the app pre-records this month's remaining planned expenses when opened, keeping their due dates (even if opened after the 1st). Future-dated entries appear in Activity on those dates. The app cannot run this while iOS fully suspends it.</Text>
           <Button title="Record this month's expenses now" secondary small onPress={postThisMonth}/>
         </View>
         <View style={styles.card}><SectionTitle>Upcoming and overdue</SectionTitle>
