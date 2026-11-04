@@ -1,13 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform,
+  ActivityIndicator, Alert, AppState, KeyboardAvoidingView, Modal, Platform,
   Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet,
   Text, TextInput, View,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { File, Paths } from 'expo-file-system';
-import * as Sharing from 'expo-sharing';
-import * as DocumentPicker from 'expo-document-picker';
+import { recoverAutomaticBackup, uploadAutomaticBackup } from './icloudBackup';
 
 // Pocket Ledger — personal finance MVP, offline/manual only.
 // Amounts are kept as integer cents to avoid floating-point currency errors.
@@ -231,7 +229,7 @@ function groupActivity(transactions) {
   }
   return [...map.values()];
 }
-// A versioned, explicit export keeps data portable without any banking connection.
+// Versioned snapshots support automatic iCloud backup and validated recovery.
 function makeBackup(data, timestamp = new Date().toISOString()) {
   return { format: BACKUP_FORMAT, version: BACKUP_VERSION, exportedAt: timestamp, payload: data };
 }
@@ -407,20 +405,126 @@ export default function App() {
   const [draft, setDraft] = useState({});
   const [error, setError] = useState('');
   const [savedError, setSavedError] = useState('');
-  const [backupBusy, setBackupBusy] = useState(false);
+  const [cloudStatus, setCloudStatus] = useState({ state: 'checking', text: 'Checking automatic iCloud backup…', at: null });
+  const dataRef = useRef(null);
+  dataRef.current = data;
+  const cloudStatusRef = useRef(cloudStatus);
+  cloudStatusRef.current = cloudStatus;
+  const persistQueueRef = useRef(Promise.resolve());
+  const backupTimerRef = useRef(null);
+  const backupRunningRef = useRef(false);
+  const lastCloudJsonRef = useRef(null);
+  const loadingRef = useRef(true);
+  loadingRef.current = loading;
+  const recoveryRunningRef = useRef(false);
+
+  async function backupCurrentData() {
+    if (backupRunningRef.current) return;
+    backupRunningRef.current = true;
+    try {
+      while (dataRef.current) {
+        const snapshot = dataRef.current;
+        if (snapshot.mode === 'demo') {
+          setCloudStatus({ state: 'demo', text: 'Demo transactions are not uploaded to iCloud.', at: null });
+          return;
+        }
+        const dataJson = JSON.stringify(snapshot);
+        if (dataJson === lastCloudJsonRef.current) return;
+        setCloudStatus({ state: 'uploading', text: 'Saving an automatic iCloud backup…', at: null });
+        try {
+          const date = await uploadAutomaticBackup(JSON.stringify(makeBackup(snapshot)));
+          lastCloudJsonRef.current = dataJson;
+          setCloudStatus({ state: 'submitted', text: 'Saved to the iCloud container; Apple may still be syncing it.', at: date });
+        } catch (e) {
+          setCloudStatus({ state: 'error', text: e?.message || 'Could not back up to iCloud. Data remains saved on this device.', at: null });
+          return;
+        }
+      }
+    } finally { backupRunningRef.current = false; }
+  }
+  function scheduleCloudBackup(delay = 1600) {
+    if (backupTimerRef.current) clearTimeout(backupTimerRef.current);
+    backupTimerRef.current = setTimeout(() => {
+      backupTimerRef.current = null;
+      backupCurrentData();
+    }, delay);
+  }
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      try { const stored = await AsyncStorage.getItem(STORAGE_KEY); if (stored) {
-        const parsed = JSON.parse(stored);
-        if (parsed && Array.isArray(parsed.accounts) && Array.isArray(parsed.transactions) && Array.isArray(parsed.schedules)) setData(normalizeData(parsed));
-      } } catch (e) { setSavedError('Saved data could not be read. No changes have been made.'); }
-      finally { setLoading(false); }
+      try {
+        const stored = await AsyncStorage.getItem(STORAGE_KEY);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (!parsed || !Array.isArray(parsed.accounts) || !Array.isArray(parsed.transactions) || !Array.isArray(parsed.schedules)) {
+            throw new Error('Local financial data is invalid.');
+          }
+          if (!cancelled) setData(normalizeData(parsed));
+        } else {
+          try {
+            const recovered = await recoverAutomaticBackup(readBackup);
+            if (cancelled) return;
+            if (recovered) {
+              await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(recovered));
+              if (!cancelled) {
+                setData(recovered);
+                setCloudStatus({ state: 'restored', text: 'Restored your latest valid iCloud snapshot automatically.', at: null });
+              }
+            } else {
+              setCloudStatus({ state: 'ready', text: 'No previous iCloud backup found. New entries will back up automatically.', at: null });
+            }
+          } catch (e) {
+            if (!cancelled) setCloudStatus({ state: 'error', text: e?.message || 'Could not check iCloud. Local tracking still works.', at: null });
+          }
+        }
+      } catch (e) {
+        if (!cancelled) setSavedError('Saved data could not be read. No changes have been made.');
+      } finally { if (!cancelled) setLoading(false); }
     })();
+    return () => { cancelled = true; };
   }, []);
   useEffect(() => {
     if (loading || !data) return;
-    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(data)).catch(() => setSavedError('Could not save changes on this device.'));
+    const snapshot = data;
+    const json = JSON.stringify(snapshot);
+    persistQueueRef.current = persistQueueRef.current.catch(() => {}).then(async () => {
+      await AsyncStorage.setItem(STORAGE_KEY, json);
+      if (dataRef.current === snapshot) scheduleCloudBackup();
+    }).catch(() => setSavedError('Could not save changes on this device. iCloud backup is paused until the local save works.'));
   }, [data, loading]);
+  async function retryCloudRecoveryWhenEmpty() {
+    if (loadingRef.current || dataRef.current || recoveryRunningRef.current) return;
+    recoveryRunningRef.current = true;
+    try {
+      const recovered = await recoverAutomaticBackup(readBackup);
+      if (recovered && !dataRef.current) {
+        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(recovered));
+        if (!dataRef.current) {
+          setData(recovered);
+          setCloudStatus({ state: 'restored', text: 'Recovered an existing iCloud backup automatically.', at: null });
+        }
+      }
+    } catch (e) {
+      if (!dataRef.current) setCloudStatus({ state: 'error', text: e?.message || 'Could not retry iCloud recovery.', at: null });
+    } finally { recoveryRunningRef.current = false; }
+  }
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', state => {
+      if (state === 'active' && !loadingRef.current) {
+        if (dataRef.current) scheduleCloudBackup(200);
+        else retryCloudRecoveryWhenEmpty();
+      }
+    });
+    const retry = setInterval(() => {
+      if (AppState.currentState !== 'active') return;
+      if (dataRef.current && cloudStatusRef.current.state === 'error') scheduleCloudBackup(200);
+      if (!dataRef.current && cloudStatusRef.current.state === 'error') retryCloudRecoveryWhenEmpty();
+    }, 5 * 60 * 1000);
+    return () => {
+      subscription.remove(); clearInterval(retry);
+      if (backupTimerRef.current) clearTimeout(backupTimerRef.current);
+    };
+  }, []);
   const update = (fn) => setData(previous => fn(previous));
   const now = today();
   const accounts = data?.accounts || [];
@@ -568,48 +672,12 @@ export default function App() {
       { text: 'Cancel', style: 'cancel' }, { text: 'Record', onPress: () => update(d => applyRecordedPayment(d, s, today())) },
     ]);
   }
-  async function exportBackup() {
-    if (!data || backupBusy) return;
-    if (Platform.OS === 'web') return Alert.alert('Use an iPhone or iPad', 'iCloud Drive export uses the iOS share sheet.');
-    setBackupBusy(true);
-    try {
-      if (!(await Sharing.isAvailableAsync())) throw new Error('The system share sheet is unavailable on this device.');
-      const file = new File(Paths.cache, `pocket-ledger-${today()}-${Date.now()}.json`);
-      file.create({ overwrite: true });
-      await file.write(JSON.stringify(makeBackup(data), null, 2));
-      await Sharing.shareAsync(file.uri, { mimeType: 'application/json', UTI: 'public.json' });
-      // Share sheet closing does not prove the user saved it anywhere.
-      Alert.alert('Check your backup', 'If you selected Save to Files → iCloud Drive, open Files and confirm the backup is there. Export is manual, not automatic syncing.');
-    } catch (err) {
-      Alert.alert('Could not export backup', err?.message || 'Please try again.');
-    } finally { setBackupBusy(false); }
-  }
-  async function importBackup() {
-    if (backupBusy) return;
-    setBackupBusy(true);
-    try {
-      const result = await DocumentPicker.getDocumentAsync({ type: ['application/json', 'text/plain', '*/*'], copyToCacheDirectory: true });
-      if (result.canceled || !result.assets?.length) return;
-      const asset = result.assets[0];
-      if (asset.size && asset.size > MAX_BACKUP_BYTES) throw new Error('The backup is larger than the supported 10 MB limit.');
-      const file = new File(asset.uri);
-      const restored = readBackup(await file.text());
-      Alert.alert('Replace current data?', `Restore ${restored.accounts.length} accounts, ${restored.transactions.length} transactions and ${restored.schedules.length} planned payments? This REPLACES all data currently on this device. Export a backup first if you want to keep it.`, [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Replace and restore', style: 'destructive', onPress: async () => {
-          try {
-            await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(restored));
-            setSavedError(''); setData(restored); setTab('home');
-            Alert.alert('Backup restored', 'Your accounts and transactions have been restored on this device.');
-          } catch (e) { Alert.alert('Restore failed', 'Could not save the imported data. Your current data has not been replaced.'); }
-        } },
-      ]);
-    } catch (err) { Alert.alert('Could not restore backup', err?.message || 'Please select a valid Pocket Ledger backup.'); }
-    finally { setBackupBusy(false); }
-  }
   function resetAll() {
-    Alert.alert('Erase all data?', 'All accounts, transactions and planned payments stored in this app will be deleted. This cannot be undone.', [
-      { text: 'Cancel', style: 'cancel' }, { text: 'Erase data', style: 'destructive', onPress: () => { setData(null); AsyncStorage.removeItem(STORAGE_KEY).catch(() => setSavedError('Could not remove local data.')); setTab('home'); } },
+    Alert.alert('Clear all records?', 'This removes the accounts, transactions and planned payments from this device. The new empty ledger will also be saved to iCloud automatically; prior snapshots may remain in iCloud. This cannot be undone in the app.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Clear records', style: 'destructive', onPress: () => {
+        setData(empty()); setSavedError(''); setTab('home');
+      } },
     ]);
   }
 
@@ -618,10 +686,11 @@ export default function App() {
     <Text style={{ fontSize: 43, marginBottom: 12 }}>◈</Text><Text style={styles.brand}>Pocket Ledger</Text>
     <Text style={[styles.subtleCenter, { fontSize: 16, marginTop: 12, marginBottom: 32 }]}>Know where your money goes. Track accounts, record spending, and view simple, clear insights.</Text>
     {savedError ? <Text style={{ color: C.red, marginBottom: 12 }}>{savedError}</Text> : null}
+    {cloudStatus.state === 'error' ? <Text style={[styles.helper, { textAlign: 'center', color: C.red, marginBottom: 14 }]}>{cloudStatus.text}</Text> : null}
     <Button title="Start with empty accounts" onPress={() => setData(empty())} />
     <View style={{ height: 12 }}/><Button title="Explore with fictional demo data" secondary onPress={() => setData(demo())} />
-    <View style={{ height: 12 }}/><Button title="Restore from Files / iCloud Drive" secondary onPress={importBackup} disabled={backupBusy} />
-    <Text style={[styles.helper, { textAlign: 'center', marginTop: 26 }]}>Offline only · No bank login · AUD</Text>
+    <Text style={[styles.helper, { textAlign: 'center', marginTop: 22 }]}>Automatic iCloud recovery is checked when you first open the app. iCloud backup requires a properly signed iOS build; local tracking still works without it.</Text>
+    <Text style={[styles.helper, { textAlign: 'center', marginTop: 12 }]}>No bank login · AUD</Text>
   </View></SafeAreaView>;
 
   return <SafeAreaView style={styles.screen}><StatusBar barStyle="dark-content"/>
@@ -729,13 +798,13 @@ export default function App() {
             {c.name !== 'Other' ? <Text style={[styles.inlineAction,{color:C.red,marginLeft:14}]} onPress={()=>removeCategory(c.name)}>Delete</Text> : null}
           </View>)}
         </View>
-        <View style={styles.card}><SectionTitle>Backup and restore</SectionTitle>
-          <Text style={styles.summary}>Export a backup to the iOS share sheet, then select Save to Files → iCloud Drive. To restore, choose the backup from Files. This is a manual file backup, not automatic iCloud syncing.</Text>
-          <Text style={styles.helper}>Privacy: backups are readable JSON and are NOT password-encrypted. Keep them in your private iCloud Drive, do not share publicly, and confirm each export was saved. Restoring replaces your current local data.</Text>
-          <Button title={backupBusy ? 'Working…' : 'Back up to Files / iCloud Drive'} onPress={exportBackup} disabled={backupBusy}/>
-          <Button title="Restore a backup" secondary onPress={importBackup} disabled={backupBusy}/>
+        <View style={styles.card}><SectionTitle>Automatic iCloud backup</SectionTitle>
+          <Text style={styles.summary}>{cloudStatus.text}</Text>
+          {cloudStatus.at ? <Text style={styles.helper}>Last saved by the app: {new Date(cloudStatus.at).toLocaleString('en-AU')}</Text> : null}
+          <Text style={styles.helper}>Backups happen after changes while the app is running and are retried when it reopens. On a new installation, the newest valid snapshot is recovered if there is no local ledger. This is not live multi-device sync and iCloud upload timing is managed by Apple.</Text>
+          <Text style={styles.helper}>Privacy: snapshots contain readable JSON in your app’s private iCloud container. They are not separately password-encrypted. A signed build with the iCloud capability and iCloud Drive enabled is required; Expo Go cannot access this feature.</Text>
         </View>
-        <View style={styles.card}><SectionTitle>Privacy and data</SectionTitle><Text style={styles.summary}>Your transaction records stay on this device unless you intentionally export a backup. Local AsyncStorage and exported backup files are not independently encrypted. No banking logins or servers are used.</Text><Button title="Erase everything / restart" secondary onPress={resetAll}/></View>
+        <View style={styles.card}><SectionTitle>Privacy and data</SectionTitle><Text style={styles.summary}>Financial records remain on this device and are automatically copied to your private app iCloud container when iCloud is available. No bank logins or app-operated servers are used.</Text><Button title="Clear all records" secondary onPress={resetAll}/></View>
       </>}
     </ScrollView>
     <View style={styles.tabBar}>{NAV.map(([key, icon, label]) => <Pressable key={key} onPress={() => setTab(key)} style={styles.tabItem}><Text style={[styles.tabIcon, tab===key && {color:C.blue}]}>{icon}</Text><Text style={[styles.tabText, tab===key && {color:C.blue, fontWeight:'800'}]}>{label}</Text></Pressable>)}</View>
