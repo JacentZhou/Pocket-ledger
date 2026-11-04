@@ -33,7 +33,14 @@ assert.equal(f.pendingOccurrencesInMonth(income,'2026-11-01').length,0);
 let ledger={accounts:[bank],transactions:[],schedules:[monthly,weekly,once,income],categories:f.defaultCategories(),incomeCategories:f.defaultIncomeCategories(),mode:'personal',autoPostPlannedExpenses:true};
 const posted=f.postPlannedMonth(ledger,'2026-11-01');
 assert.equal(posted.transactions.length,6);
-assert(posted.transactions.every(t=>t.type==='expense' && t.date==='2026-11-01' && t.scheduleId && t.scheduledFor));
+assert(posted.transactions.every(t=>t.type==='expense' && t.date === t.scheduledFor && t.scheduleId && t.scheduledFor), 'posted expenses must retain the actual due date');
+assert.equal(posted.transactions.find(t=>t.scheduleId==='rent').date, '2026-11-30');
+assert.equal(posted.transactions.find(t=>t.scheduleId==='once').date, '2026-11-14');
+assert.equal(posted.transactions.filter(t=>t.scheduleId==='weekly').map(t=>t.date).join(','), '2026-11-04,2026-11-11,2026-11-18,2026-11-25');
+assert(!posted.transactions.some(t => t.date === '2026-11-01'), 'nothing should be falsely dated on the first');
+assert.equal(f.periodTotals(posted.transactions,'2026-11-01','2026-11-01').expenses,0, 'November 1 daily spend should be zero');
+assert.equal(f.periodTotals(posted.transactions,'2026-11-14','2026-11-14').expenses,2500, 'one-off expense lands on its planned date');
+assert.equal(f.periodTotals(posted.transactions,'2026-11-04','2026-11-04').expenses,9000, 'weekly expense lands on its planned date');
 assert.equal(posted.schedules.find(s=>s.id==='once').completed,true);
 assert.equal(posted.schedules.find(s=>s.id==='weekly').lastPaidThrough,'2026-11-25');
 assert.equal(f.dueDate(posted.schedules.find(s=>s.id==='weekly'),'2026-11-04'),'2026-12-02');
@@ -41,11 +48,14 @@ assert.equal(f.dueDate(posted.schedules.find(s=>s.id==='rent'),'2026-11-04'),'20
 assert.strictEqual(f.postPlannedMonth(posted,'2026-11-01'),posted,'should not duplicate when run twice');
 assert.equal(f.periodTotals(posted.transactions,'2026-11-01','2026-11-30').expenses,42000+9000*4+2500);
 assert.equal(f.periodTotals(posted.transactions,'2026-11-01','2026-11-30').income,0);
-assert.equal(f.postPlannedMonth(posted,'2026-12-01').transactions.length,posted.transactions.length+1+5); // rent and 4 weeks
+const december=f.postPlannedMonth(posted,'2026-12-01');
+assert.equal(december.transactions.length,posted.transactions.length+1+5); // rent and 5 weekly occurrences
+assert(december.transactions.slice(posted.transactions.length).every(t=>t.date.startsWith('2026-12-') && t.date===t.scheduledFor));
+assert.strictEqual(f.postPlannedMonth(december,'2026-12-01'),december,'December reruns cannot add duplicates');
 const due={...income,due:'2026-11-10'};
 const recorded=f.applyRecordedPayment(posted,due,'2026-11-10');
 assert.equal(recorded.transactions.at(-1).type,'income');
 assert.equal(recorded.transactions.at(-1).scheduledFor,'2026-11-10');
 assert.equal(f.periodTotals(recorded.transactions,'2026-11-01','2026-11-30').income,65000);
 assert.strictEqual(f.applyRecordedPayment(recorded,due,'2026-11-10'),recorded,'income record must be idempotent');
-console.log('v0.5 icon, income category, plan-income and month-start posting tests passed.');
+console.log('v0.5.1 month-ahead posting preserves scheduled dates, is duplicate-safe, and all v0.5 tests passed.');
