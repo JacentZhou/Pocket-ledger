@@ -1,4 +1,26 @@
-# Pocket Ledger v0.4 — Automatic iCloud backup
+# Pocket Ledger v0.5 — Category icons and monthly planned posting
+
+Pocket Ledger remains a manual, offline-first personal finance tracker built with React Native and Expo.
+
+## New in v0.5
+
+- Select emoji icons for expense and income categories, add/rename/delete both types via the new **Settings → Spending / Income** category tabs. Category colour selectors are removed. Older stored colours remain valid for chart and backup compatibility.
+- Activity rows now show category icons, description, account and amount without repeated type labels. Expenses are red, income green, and transfers neutral.
+- Planned entries now support income in addition to expenses and credit-card repayments, with filter tabs and tap-to-edit details. Record or delete individual planned entries from their editor.
+- Optional **Automatically record on the 1st** setting. When enabled, the app posts this month's remaining planned expense occurrences as transactions dated on the first of the month when it opens. Weekly/fortnightly occurrences are included, but income and card repayments are not auto-posted.
+- A separate **Record this month's expenses now** button posts remaining eligible expenses after confirmation.
+- Planned postings are linked to schedule IDs and original due dates to prevent duplicate posting. Upcoming due dates skip already posted future occurrences.
+- Legacy local data and existing iCloud backup format remain supported.
+
+**Accounting caution:** Choosing to post bills on the first of the month immediately changes balances, spending charts, and cash flow, even when the actual bills have not been paid yet. Check for manually recorded duplicate expenses before enabling. This feature does not pay bills or contact banks.
+
+## Testing and iCloud
+
+Run `npm install`, `npm test`, and `npx expo-doctor`; test a signed native iOS build before using real financial data. Automatic iCloud backup from v0.4 requires Apple Developer signing and iCloud entitlements; Expo Go cannot access the native module. Backups are not separately password-encrypted.
+
+--- 
+
+## v0.4 iCloud setup and background
 
 Pocket Ledger is a React Native + Expo (SDK 57) manual personal finance tracker for iPhone and iPad. Account balances, credit cards, categories, transactions, spending insights and recurring payments remain available.
 
