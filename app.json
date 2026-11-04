@@ -2,25 +2,15 @@
   "expo": {
     "name": "Pocket Ledger",
     "slug": "pocket-ledger",
-    "version": "0.7.0",
+    "version": "0.8.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
-    "ios": {
-      "supportsTablet": true,
-      "bundleIdentifier": "com.jacentzhou.pocketledger",
-      "usesIcloudStorage": true
+    "web": {
+      "bundler": "metro",
+      "output": "single"
     },
-    "android": {
-      "package": "com.example.pocketledger"
-    },
-    "plugins": [
-      [
-        "@oleg_svetlichnyi/expo-icloud-storage",
-        {
-          "containerIdentifier": "iCloud.$(CFBundleIdentifier)",
-          "containerName": "Pocket Ledger"
-        }
-      ]
-    ]
+    "experiments": {
+      "baseUrl": "/Pocket-ledger"
+    }
   }
 }

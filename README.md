@@ -1,60 +1,37 @@
-# Pocket Ledger v0.7 — Cash Flow Forecast
+# Pocket Ledger PWA — v0.8
 
-An offline-first personal finance app for iPhone and iPad, built using React Native and Expo. Track actual money movements manually and preview upcoming payments without recording them early.
+Personal finance tracker for iPhone, iPad and desktop using an **installable offline-first web app**. No Apple Developer membership is required. The original native iOS app remains in the `native-ios` Git branch.
 
-## What changed in v0.7
+## What works
 
-- **Planned → Forecast:** account-specific projections over 7, 14, 30, 60 or 90 days, including a daily chart, lowest projected balance, shortfall warnings and a conditional safe-to-spend estimate.
-- **Planned → Upcoming:** upcoming and overdue expenses, income and card repayments, with tap-to-confirm as an actual transaction, using today's date and preserving the original planned due date.
-- **Planned → Calendar:** monthly calendar of due dates, including linked payments already recorded.
-- **Settings → Accounts:** optional minimum-balance buffer for cash/bank accounts or minimum available credit for credit cards.
-- **No automatic first-of-month recording:** planned transactions stay projected until confirmed. Old settings are retired during migration.
-- **Historical figures and actual account balances exclude future-dated transactions**; future-dated actual entries appear in forecasts instead.
+All manual transactions, account balances, income/expense categories and icons, recurring plans, credit cards, search filters, charts, Settings sections, and v0.7 cash-flow Forecast/Upcoming/Calendar are preserved. Data remains local to the browser using IndexedDB; no data is uploaded to the GitHub Pages server.
 
-## Accounting rules
+### Install on iPhone
 
-- Income and expenses are only actual after being entered or confirmed. Plans alone do not affect the recorded balance or historical spending totals.
-- Planned credit-card repayments are transfers; they reduce both bank cash and card debt, without counting as additional expense.
-- Every scheduled occurrence is linked by `(scheduleId, scheduledFor)` when confirmed, so it is not projected twice. Out-of-order payment confirmation does not hide earlier outstanding instalments.
-- Overdue obligations are projected as payable today; on a single date, expenses/repayments are conservatively applied before income.
-- Future-dated *actual* transactions are excluded from today's actual balance but are included on their dates in the forecast.
-- Older v0.5 first-of-month posts remain untouched; review them manually as the app cannot safely distinguish early recorded payments from real ones. Deleting/editing a linked transaction can change whether the corresponding plan appears pending.
-- A manually entered transaction without a plan link is not matched automatically. Mark the plan paid instead of entering a duplicate payment manually when possible.
+1. Enable **Settings → Pages → Source: GitHub Actions** in this repository if not already enabled; wait until `Deploy Pocket Ledger PWA` succeeds in Actions.
+2. Open **https://jacentzhou.github.io/Pocket-ledger/** in Safari on the iPhone.
+3. Tap the Safari **Share** button → **Add to Home Screen** → **Add**.
+4. Launch using the new Home Screen icon. Open it online once and verify it also launches offline.
 
-## How to use it
+**Important:** Web-app storage is separate from native iOS app storage, and may also be different between a Safari tab and Home Screen installation. Native iCloud backups are NOT imported into the PWA. You must re-enter your real transactions, unless you arrange a separate migration path.
 
-1. Add a bank, savings, cash or credit-card account under **Settings → Accounts**. Record its opening balance (for cards, starting debt) and an optional buffer or credit limit.
-2. Enter actual income/expenses/transfers in **Activity** or using **+ Add transaction**.
-3. Create recurring bills, expected income and credit-card repayments under **Settings → Planned payments**.
-4. Open **Planned → Forecast**, select your account and horizon, and check any projected shortfalls.
-5. Open **Planned → Upcoming** and tap a scheduled item to **Record paid** when it actually happens; it then appears in Activity and no longer counts as a pending plan.
-6. Use **Planned → Calendar** to inspect due dates and linked paid items.
+## How data are stored
 
-Forecasts are estimates based only on the information you entered, not verified balances from your bank. The safe-to-spend figure assumes expected income arrives, all planned payments occur, and you incur no unplanned costs. Do not use it as a guaranteed spending allowance.
+- Records are stored on-device in Safari/WebKit **IndexedDB**, under the website's origin (using the `pocket-ledger-v1` ledger key).
+- Data are not cloud-backed, synchronized, encrypted separately by the app, or sent to the GitHub Pages host. Static app code is hosted publicly; personal records are not.
+- iOS/browser eviction, clearing website data, deleting the Home Screen app, or device loss can permanently delete the records. **Do not make this the only copy of important financial information** until a proper backup/export method exists.
+- Future-dated planned payments remain forecasts, not actual spending; real transactions only count for current balances when their dates have arrived.
+- Browser native confirmation dialogs replace React Native's native-only alerts so deleting transactions, clearing the ledger and recording payments remain interactive.
 
-## Install, test and build
+## Develop and deploy
 
 ```sh
 npm install
 npm test
-npx expo-doctor
-npx eas-cli build --platform ios --profile preview
+npm run web
+npm run build:web
 ```
 
-The native iCloud module needs a properly signed iOS build. Expo Go cannot exercise it.
+Production `dist/` includes Expo's static web bundle, manifest, iOS Home Screen icon, and a service worker that pre-caches app assets for offline startup. Expo's `experiments.baseUrl` is `/Pocket-ledger` for GitHub Pages project hosting. Deployments are automated from `main` using `.github/workflows/pages.yml` when Pages is configured to use GitHub Actions.
 
-The package uses `@oleg_svetlichnyi/expo-icloud-storage` (native iOS) and Expo SDK 57. The Expo configuration declares a proposed bundle identifier `com.jacentzhou.pocketledger`; confirm this identity before the first signed build. Enable iCloud Documents for the App ID and a matching iCloud container in Apple Developer, and turn on iCloud Drive on the device.
-
-## iCloud and privacy
-
-- Records persist locally with AsyncStorage using the existing `pocket-ledger-v1` key. Old account, category, transaction, and schedule data remain compatible.
-- Automatic iCloud snapshots from v0.4 continue after local saves and on app activation. They do not guarantee uploads while iOS fully suspends the app, and are not real-time multi-device sync.
-- A fresh installation without local data tries to restore the newest valid snapshot; it does not overwrite an existing ledger.
-- Backups are readable JSON in the private app iCloud container and are **not independently password-encrypted**. Do not put actual bank credentials or financial exports into the GitHub repository.
-- This build has passed source parsing and pure regression tests, but native iCloud transfer, backup recovery and the complete UI still need signed-device testing before use with real financial records.
-
-## Tests
-
-`npm test` runs the existing finance, iCloud backup, category and recurring-plan tests plus `test-forecast.cjs` for future-dated actuals, shortfalls, buffers, credit-card repayments, calendar entries, duplicate prevention and out-of-order payment confirmation.
-
-The previous month-posting pure helper is intentionally retained to support legacy tests, but it is **not wired to the UI or executed automatically**.
+The PWA is not a native iOS app. It cannot access the removed native iCloud storage module or receive guaranteed background work while the app is closed. Offline caching and browser storage still need a real iPhone test.
