@@ -407,6 +407,21 @@ function Pill({ title, active, onPress, color, compact = false }) {
 function SectionTitle({ children, side }) {
   return <View style={styles.sectionTitle}><Text style={styles.sectionText}>{children}</Text>{side}</View>;
 }
+function SettingsMenuRow({ icon, title, detail, onPress }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={`Open ${title} settings`} onPress={onPress} style={styles.settingsMenuRow}>
+    <View style={styles.settingsMenuIcon}><Text style={{fontSize:21}}>{icon}</Text></View>
+    <View style={{flex:1,minWidth:0}}>
+      <Text style={styles.settingsMenuTitle}>{title}</Text>
+      <Text style={styles.settingsMenuDetail}>{detail}</Text>
+    </View>
+    <Text style={styles.settingsChevron}>›</Text>
+  </Pressable>;
+}
+const SETTINGS_TITLES = {
+  menu:'Settings', planned:'Planned payments', expenses:'Spending categories',
+  income:'Income categories', accounts:'Account management',
+  backup:'iCloud backup', privacy:'Privacy & data',
+};
 function Metric({ label, value, color }) {
   return <View style={{ flex: 1, minWidth: 105 }}><Text style={styles.metricLabel}>{label}</Text><Text style={[styles.metricValue, color && { color }]} numberOfLines={1} adjustsFontSizeToFit>{value}</Text></View>;
 }
@@ -464,7 +479,7 @@ export default function App() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState('home');
-  const [settingsCategoryTab, setSettingsCategoryTab] = useState('expense');
+  const [settingsPage, setSettingsPage] = useState('menu');
   const [plannedView, setPlannedView] = useState('all');
   const [activeDay, setActiveDay] = useState(today());
   const [period, setPeriod] = useState('month');
@@ -487,6 +502,8 @@ export default function App() {
   const [error, setError] = useState('');
   const [savedError, setSavedError] = useState('');
   const [cloudStatus, setCloudStatus] = useState({ state: 'checking', text: 'Checking automatic iCloud backup…', at: null });
+  const pageScrollRef = useRef(null);
+  useEffect(() => { pageScrollRef.current?.scrollTo({y:0,animated:false}); }, [tab,settingsPage]);
   const dataRef = useRef(null);
   dataRef.current = data;
   const cloudStatusRef = useRef(cloudStatus);
@@ -663,7 +680,8 @@ export default function App() {
     setModal('account'); setEditingId(a?.id || null); setError('');
     setDraft(a ? { ...a, opening: (a.openingCents / 100).toFixed(2), creditLimit: ((a.creditLimitCents || 0) / 100).toFixed(2) } : { name: '', kind: 'Bank', opening: '0.00', creditLimit: '0.00', color: ACCOUNT_COLORS[accounts.length % ACCOUNT_COLORS.length] });
   }
-  function openCategory(c = null, kind = settingsCategoryTab) {
+  function goToSettings(page = 'menu') { setSettingsPage(page); setTab('settings'); }
+  function openCategory(c = null, kind = settingsPage === 'income' ? 'income' : 'expense') {
     setModal('category'); setEditingId(c?.name || null); setError('');
     setDraft(c ? {...c, categoryType:kind} : { name:'', categoryType:kind, icon:kind==='income'?'💰':'📦' });
   }
@@ -749,7 +767,7 @@ export default function App() {
     }));
     closeModal();
   }
-  function removeCategory(name, kind = settingsCategoryTab) {
+  function removeCategory(name, kind = settingsPage === 'income' ? 'income' : 'expense') {
     if (name === 'Other') return Alert.alert('Required category', 'Other is kept as a fallback.');
     const key = kind === 'income' ? 'incomeCategories' : 'categories';
     Alert.alert('Delete category?', `Existing ${kind} transactions and plans in ${name} will be moved to Other.`, [
@@ -809,8 +827,13 @@ export default function App() {
   </View></SafeAreaView>;
 
   return <SafeAreaView style={styles.screen}><StatusBar barStyle="dark-content"/>
-    <ScrollView contentContainerStyle={[styles.page, tab === 'transactions' && styles.activityPage]} keyboardShouldPersistTaps="handled">
-      <View style={styles.header}><View><Text style={styles.eyebrow}>POCKET LEDGER {data.mode === 'demo' ? '· DEMO' : ''}</Text><Text style={styles.pageTitle}>{NAV.find(n => n[0] === tab)?.[2]}</Text></View><View style={styles.avatar}><Text style={{ fontSize: 23, color: C.blue }}>◈</Text></View></View>
+    <ScrollView ref={pageScrollRef} contentContainerStyle={[styles.page, tab === 'transactions' && styles.activityPage]} keyboardShouldPersistTaps="handled">
+      <View style={styles.header}><View style={{flex:1}}>
+        {tab === 'settings' && settingsPage !== 'menu'
+          ? <Pressable accessibilityRole="button" accessibilityLabel="Back to all settings" onPress={()=>setSettingsPage('menu')}><Text style={styles.settingsBack}>‹ All settings</Text></Pressable>
+          : <Text style={styles.eyebrow}>POCKET LEDGER {data.mode === 'demo' ? '· DEMO' : ''}</Text>}
+        <Text style={styles.pageTitle}>{tab === 'settings' ? SETTINGS_TITLES[settingsPage] : NAV.find(n => n[0] === tab)?.[2]}</Text>
+      </View><View style={styles.avatar}><Text style={{ fontSize: 23, color: C.blue }}>◈</Text></View></View>
       {savedError ? <Text style={styles.errorBanner}>{savedError}</Text> : null}
       {data.mode === 'demo' ? <View style={styles.demoBanner}><Text style={styles.demoText}>Fictional demo data. Erase it in Accounts before tracking your own finances.</Text></View> : null}
       {tab === 'home' && <>
@@ -853,19 +876,8 @@ export default function App() {
         </View>
       </>}
       {tab === 'schedule' && <>
-        <View style={styles.toolbar}><Text style={[styles.subtle, { flex: 1 }]}>Planned entries only affect your balances once recorded. Tap a plan to change it.</Text><Button title="+ Plan" small onPress={() => accounts.length ? openSchedule() : openAccount()}/></View>
+        <View style={styles.toolbar}><Text style={[styles.subtle, { flex: 1 }]}>See upcoming payments, income and repayments. Tap an entry to edit.</Text><Button title="Manage" small onPress={()=>goToSettings('planned')}/></View>
         <View style={styles.filterRow}>{[['all','All'],['expense','Expenses'],['income','Income'],['card_payment','Card repayments']].map(([k,label])=><Pill compact key={k} title={label} active={plannedView===k} onPress={()=>setPlannedView(k)}/>)}</View>
-        <View style={styles.card}>
-          <SectionTitle>Record expenses at month start</SectionTitle>
-          <Text style={styles.subtle}>Optional: record all eligible planned expenses for this month in advance, keeping each transaction on its original scheduled date. Weekly plans can create several separately dated entries. Already-recorded occurrences are skipped. Income and card repayments are excluded.</Text>
-          <Pressable accessibilityRole="switch" accessibilityState={{checked:!!data.autoPostPlannedExpenses}}
-            onPress={()=>update(d=>({...d,autoPostPlannedExpenses:!d.autoPostPlannedExpenses}))} style={styles.between}>
-            <Text style={styles.rowTitle}>Automatically record on the 1st</Text>
-            <Text style={[styles.toggleBadge,{backgroundColor:data.autoPostPlannedExpenses?C.green:'#DCE1EB'}]}>{data.autoPostPlannedExpenses?'ON':'OFF'}</Text>
-          </Pressable>
-          <Text style={styles.helper}>When enabled, the app pre-records this month's remaining planned expenses when opened, keeping their due dates (even if opened after the 1st). Future-dated entries appear in Activity on those dates. The app cannot run this while iOS fully suspends it.</Text>
-          <Button title="Record this month's expenses now" secondary small onPress={postThisMonth}/>
-        </View>
         <View style={styles.card}><SectionTitle>Upcoming and overdue</SectionTitle>
           {!scheduled.filter(s=>plannedView==='all'||(s.kind||'expense')===plannedView).length ? <EmptyMessage title="No planned entries" detail="Add income, expenses or a card repayment plan." /> : scheduled.filter(s=>plannedView==='all'||(s.kind||'expense')===plannedView).map(s =>
             <Pressable key={s.id} accessibilityRole="button" accessibilityLabel={`Edit planned ${s.name}`} onPress={()=>openSchedule(s)} style={styles.scheduleRow}>
@@ -901,7 +913,7 @@ export default function App() {
         </View>
       </>}
       {tab === 'accounts' && <>
-        <View style={styles.toolbar}><Text style={[styles.subtle,{flex:1}]}>Asset balances less credit card amounts owed = net worth.</Text><Button title="+ Account" small onPress={() => openAccount()}/></View>
+        <View style={styles.toolbar}><Text style={[styles.subtle,{flex:1}]}>Asset balances less credit card amounts owed = net worth.</Text><Button title="Manage" small onPress={()=>goToSettings('accounts')}/></View>
         {!accounts.length ? <View style={styles.card}><EmptyMessage title="Add your first account" detail="Start with a bank, savings, cash or credit card account."/></View> : accounts.map(a => {
           const current = accountBalance(a, transactions);
           const card = a.kind === 'Credit Card';
@@ -915,36 +927,94 @@ export default function App() {
             <View style={styles.lightDivider}/>
             <View style={styles.between}><Text style={styles.helper}>{card ? 'Opening owed' : 'Opening balance'}: {money(a.openingCents)}</Text><View style={{ flexDirection:'row', gap:14 }}>
               {card && accounts.some(b => b.kind !== 'Credit Card') ? <Text style={styles.inlineAction} onPress={() => openTransaction(null, { type:'transfer', accountId: accounts.find(b=>b.kind !== 'Credit Card').id, toAccountId:a.id, category:'Transfer', description:`Payment to ${a.name}` })}>Repay</Text> : null}
-              <Text style={styles.inlineAction} onPress={() => openAccount(a)}>Edit</Text><Text style={[styles.inlineAction, { color:C.red }]} onPress={() => confirmRemove('account', a.id)}>Delete</Text>
+              <Text style={styles.inlineAction} onPress={()=>goToSettings('accounts')}>Settings ›</Text>
             </View></View>
           </View>;
         })}
       </>}
       {tab === 'settings' && <>
-        <View style={styles.card}>
-          <SectionTitle>Transaction categories</SectionTitle>
-          <Text style={styles.subtle}>Choose an icon for each category. Expense and income categories are managed separately.</Text>
-          <View style={styles.filterRow}>
-            <Pill title="Spending" active={settingsCategoryTab==='expense'} onPress={()=>setSettingsCategoryTab('expense')}/>
-            <Pill title="Income" active={settingsCategoryTab==='income'} onPress={()=>setSettingsCategoryTab('income')}/>
+        {settingsPage === 'menu' && <View style={styles.card}>
+          <Text style={styles.subtle}>Choose what you'd like to adjust. Each item opens its own settings screen.</Text>
+          <SettingsMenuRow icon="📅" title="Planned expenses & income" detail={`${schedules.length} plans · monthly posting options`} onPress={()=>setSettingsPage('planned')}/>
+          <SettingsMenuRow icon="🛒" title="Spending categories" detail={`${categories.length} categories · names and icons`} onPress={()=>setSettingsPage('expenses')}/>
+          <SettingsMenuRow icon="💼" title="Income categories" detail={`${incomeCategories.length} categories · names and icons`} onPress={()=>setSettingsPage('income')}/>
+          <SettingsMenuRow icon="🏦" title="Accounts" detail={`${accounts.length} accounts · add, edit or remove`} onPress={()=>setSettingsPage('accounts')}/>
+          <SettingsMenuRow icon="☁️" title="Automatic iCloud backup" detail="Backup status and recovery information" onPress={()=>setSettingsPage('backup')}/>
+          <SettingsMenuRow icon="🔒" title="Privacy & data" detail="Data storage and clear-all controls" onPress={()=>setSettingsPage('privacy')}/>
+        </View>}
+        {settingsPage === 'planned' && <>
+          <View style={styles.card}>
+            <SectionTitle>Record planned expenses in advance</SectionTitle>
+            <Text style={styles.subtle}>Pre-record expenses due this month, keeping every transaction on its original scheduled date. Income and credit-card repayments are not automatically recorded.</Text>
+            <Pressable accessibilityRole="switch" accessibilityState={{checked:!!data.autoPostPlannedExpenses}}
+              onPress={()=>update(d=>({...d,autoPostPlannedExpenses:!d.autoPostPlannedExpenses}))} style={styles.between}>
+              <Text style={[styles.rowTitle,{flex:1}]}>Automatically record at month start</Text>
+              <Text style={[styles.toggleBadge,{backgroundColor:data.autoPostPlannedExpenses?C.green:'#DCE1EB'}]}>{data.autoPostPlannedExpenses?'ON':'OFF'}</Text>
+            </Pressable>
+            <Text style={styles.helper}>When enabled, the app records the month's remaining planned expenses when opened (even after the 1st), preserving their due dates. It does not run while iOS fully suspends the app.</Text>
+            <Button title="Record this month's planned expenses now" secondary small onPress={postThisMonth}/>
           </View>
-          <Button title={settingsCategoryTab==='income'?'+ Income category':'+ Spending category'} secondary small onPress={()=>openCategory(null,settingsCategoryTab)}/>
-          {(settingsCategoryTab==='income'?incomeCategories:categories).map(c=><Pressable key={c.name} accessibilityRole="button" onPress={()=>openCategory(c,settingsCategoryTab)} style={styles.miniRow}>
+          <View style={styles.card}>
+            <SectionTitle side={<Button title="+ New plan" small onPress={()=>accounts.length ? openSchedule() : openAccount()}/>}>Manage planned entries</SectionTitle>
+            <Text style={styles.subtle}>Tap a plan to adjust its amount, due date, recurrence, category or account, or delete it in the editor.</Text>
+            {!schedules.length ? <EmptyMessage title="No plans yet" detail="Add planned expenses, income or credit-card repayments."/> :
+              [...schedules].sort((a,b)=>a.startDate.localeCompare(b.startDate)).map(s=>
+                <Pressable key={s.id} accessibilityRole="button" accessibilityLabel={`Edit planned ${s.name}`} onPress={()=>openSchedule(s)} style={styles.scheduleRow}>
+                  <View style={styles.txIcon}><Text style={{fontSize:18}}>{categoryIcon({type:s.kind==='card_payment'?'transfer':s.kind||'expense',category:s.category})}</Text></View>
+                  <View style={{flex:1,minWidth:0}}>
+                    <Text style={styles.rowTitle} numberOfLines={1}>{s.name}</Text>
+                    <Text style={styles.rowSubtitle} numberOfLines={2}>{s.completed ? 'Completed' : (dueDate(s,now) || s.startDate)} · {s.repeat} · {accountName(s.accountId)}</Text>
+                  </View>
+                  <Text style={styles.settingsChevron}>›</Text>
+                </Pressable>)}
+          </View>
+        </>}
+        {settingsPage === 'expenses' && <View style={styles.card}>
+          <SectionTitle side={<Button title="+ Add" small onPress={()=>openCategory(null,'expense')}/>}>Spending categories</SectionTitle>
+          <Text style={styles.subtle}>Tap to rename or choose an icon. Changes update matching expenses and planned payments.</Text>
+          {categories.map(c=><Pressable key={c.name} accessibilityRole="button" onPress={()=>openCategory(c,'expense')} style={styles.miniRow}>
             <Text style={styles.categoryEmoji}>{c.icon || CATEGORY_ICONS[c.name] || '📦'}</Text>
             <Text style={[styles.rowTitle,{flex:1}]}>{c.name}</Text>
-            <Text style={styles.smallLink}>Edit ›</Text>
+            <Text style={styles.settingsChevron}>›</Text>
           </Pressable>)}
-        </View>
-        <View style={styles.card}><SectionTitle>Automatic iCloud backup</SectionTitle>
+        </View>}
+        {settingsPage === 'income' && <View style={styles.card}>
+          <SectionTitle side={<Button title="+ Add" small onPress={()=>openCategory(null,'income')}/>}>Income categories</SectionTitle>
+          <Text style={styles.subtle}>Tap to rename or choose an icon. Changes update matching income and planned income.</Text>
+          {incomeCategories.map(c=><Pressable key={c.name} accessibilityRole="button" onPress={()=>openCategory(c,'income')} style={styles.miniRow}>
+            <Text style={styles.categoryEmoji}>{c.icon || CATEGORY_ICONS[c.name] || '💰'}</Text>
+            <Text style={[styles.rowTitle,{flex:1}]}>{c.name}</Text>
+            <Text style={styles.settingsChevron}>›</Text>
+          </Pressable>)}
+        </View>}
+        {settingsPage === 'accounts' && <View style={styles.card}>
+          <SectionTitle side={<Button title="+ Add" small onPress={()=>openAccount()}/>}>Manage accounts</SectionTitle>
+          <Text style={styles.subtle}>Add or edit bank, savings, cash and credit-card accounts. An account in use cannot be deleted.</Text>
+          {!accounts.length ? <EmptyMessage title="No accounts" detail="Add an account to track income and expenses."/> : accounts.map(a=><View key={a.id} style={styles.miniRow}>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Edit ${a.name} account`} onPress={()=>openAccount(a)} style={{flex:1,flexDirection:'row',gap:12,alignItems:'center'}}>
+              <View style={[styles.accountLogo,{width:34,height:34,borderRadius:10,backgroundColor:a.color}]}><Text style={{color:'#fff',fontWeight:'800'}}>{a.name.slice(0,1).toUpperCase()}</Text></View>
+              <View style={{flex:1,minWidth:0}}><Text style={styles.rowTitle} numberOfLines={1}>{a.name}</Text><Text style={styles.rowSubtitle}>{a.kind}</Text></View>
+              <Text style={styles.smallLink}>Edit ›</Text>
+            </Pressable>
+            <Text accessibilityRole="button" style={[styles.inlineAction,{color:C.red,marginLeft:14}]} onPress={()=>confirmRemove('account',a.id)}>Delete</Text>
+          </View>)}
+        </View>}
+        {settingsPage === 'backup' && <View style={styles.card}>
+          <SectionTitle>Automatic iCloud backup</SectionTitle>
           <Text style={styles.summary}>{cloudStatus.text}</Text>
           {cloudStatus.at ? <Text style={styles.helper}>Last saved by the app: {new Date(cloudStatus.at).toLocaleString('en-AU')}</Text> : null}
-          <Text style={styles.helper}>Backups occur while the app is running. On a new installation the latest valid snapshot is recovered if no local ledger exists. This is not live multi-device sync.</Text>
-          <Text style={styles.helper}>Backups are readable JSON inside the app’s private iCloud container and are not separately password-encrypted. A signed native iOS build is required.</Text>
-        </View>
-        <View style={styles.card}><SectionTitle>Privacy and data</SectionTitle><Text style={styles.summary}>Records stay on this device and are backed up automatically when iCloud is available. No bank credentials or external app server are used.</Text><Button title="Clear all records" secondary onPress={resetAll}/></View>
+          <Text style={styles.helper}>Backups occur while the app runs. A new installation attempts to recover the latest valid snapshot if no local ledger exists. This is not live multi-device sync.</Text>
+          <Text style={styles.helper}>Backups are readable JSON in the app's private iCloud container and are not separately password-encrypted. A signed native iOS build is required.</Text>
+        </View>}
+        {settingsPage === 'privacy' && <View style={styles.card}>
+          <SectionTitle>Privacy and data</SectionTitle>
+          <Text style={styles.summary}>Records stay on this device and are backed up automatically when iCloud is available. No bank credentials or external app server are used.</Text>
+          <Text style={styles.helper}>Clearing records removes local financial data and creates a new empty backup. Earlier iCloud snapshots may remain.</Text>
+          <Button title="Clear all records" secondary onPress={resetAll}/>
+        </View>}
       </>}
     </ScrollView>
-    <View style={styles.tabBar}>{NAV.map(([key, icon, label]) => <Pressable key={key} onPress={() => setTab(key)} style={styles.tabItem}><Text style={[styles.tabIcon, tab===key && {color:C.blue}]}>{icon}</Text><Text style={[styles.tabText, tab===key && {color:C.blue, fontWeight:'800'}]}>{label}</Text></Pressable>)}</View>
+    <View style={styles.tabBar}>{NAV.map(([key, icon, label]) => <Pressable key={key} onPress={() => { if (key === 'settings') setSettingsPage('menu'); setTab(key); }} style={styles.tabItem}><Text style={[styles.tabIcon, tab===key && {color:C.blue}]}>{icon}</Text><Text style={[styles.tabText, tab===key && {color:C.blue, fontWeight:'800'}]}>{label}</Text></Pressable>)}</View>
     <Modal visible={!!modal} animationType="slide" presentationStyle="pageSheet" onRequestClose={closeModal}>
       <SafeAreaView style={styles.modalScreen}><KeyboardAvoidingView style={{ flex:1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View style={styles.modalHeader}><Text style={styles.modalTitle}>{editingId ? 'Edit' : 'New'} {modal === 'transaction' ? 'transaction' : modal === 'account' ? 'account' : modal === 'category' ? `${draft.categoryType==='income'?'income':'spending'} category` : 'planned payment'}</Text><Text onPress={closeModal} style={styles.close}>Close</Text></View>
@@ -1038,6 +1108,11 @@ const styles = StyleSheet.create({
   tabBar:{flexDirection:'row',backgroundColor:'#fff',borderTopWidth:1,borderTopColor:C.border,paddingVertical:10,paddingHorizontal:3},tabItem:{flex:1,alignItems:'center',justifyContent:'center',gap:4},tabIcon:{fontSize:23,fontWeight:'800',color:'#A1AAC0'},tabText:{fontSize:10,color:'#8B96AA',fontWeight:'600'},
   modalScreen:{flex:1,backgroundColor:C.pale},modalHeader:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',padding:20,backgroundColor:'#fff',borderBottomWidth:1,borderBottomColor:C.border},modalTitle:{color:C.ink,fontSize:20,fontWeight:'800'},close:{fontSize:14,color:C.blue,fontWeight:'800'},
   fieldLabel:{fontSize:13,fontWeight:'800',color:C.ink},input:{backgroundColor:'#fff',borderColor:'#DDE4EF',borderWidth:1,borderRadius:12,paddingHorizontal:14,paddingVertical:13,fontSize:16,color:C.ink},helper:{fontSize:11,color:C.mute,lineHeight:17},chips:{flexDirection:'row',flexWrap:'wrap',gap:7},colorDot:{width:35,height:35,borderRadius:18},
+  settingsBack:{color:C.blue,fontSize:13,fontWeight:'800',marginBottom:2},
+  settingsMenuRow:{flexDirection:'row',alignItems:'center',gap:12,paddingVertical:14,borderTopWidth:1,borderTopColor:C.border},
+  settingsMenuIcon:{width:42,height:42,borderRadius:13,backgroundColor:'#F1F4FA',alignItems:'center',justifyContent:'center'},
+  settingsMenuTitle:{fontSize:14,fontWeight:'800',color:C.ink},settingsMenuDetail:{fontSize:11,color:C.mute,marginTop:3,lineHeight:16},
+  settingsChevron:{color:C.mute,fontSize:24,fontWeight:'600'},
   categoryEmoji:{fontSize:22,width:36,marginRight:7,textAlign:'center'},iconPicker:{flexDirection:'row',flexWrap:'wrap',gap:8},iconChoice:{width:45,height:45,borderRadius:12,backgroundColor:'#F2F4FA',justifyContent:'center',alignItems:'center',borderWidth:1,borderColor:'#E2E6EF'},iconChoiceSelected:{borderColor:C.blue,borderWidth:2,backgroundColor:'#E4E9FE'},toggleBadge:{color:'#fff',fontSize:11,fontWeight:'800',paddingHorizontal:12,paddingVertical:7,borderRadius:9,overflow:'hidden'},
   errorBanner:{color:'#9A2D46',backgroundColor:'#FFE7ED',padding:12,borderRadius:9,fontSize:12},demoBanner:{backgroundColor:'#FFF5DF',borderRadius:12,padding:11},demoText:{color:'#9B6D25',fontSize:11,lineHeight:17},
 });
